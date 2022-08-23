@@ -14,7 +14,7 @@
 #endif
 
 // PHEAP_USE_C_STDLIB
-// TODO XXX write comment.
+// Set this to zero if you do not want to use the standard C library headers (requires extra work, read below).
 #ifndef PHEAP_USE_C_STD
 	#define PHEAP_USE_C_STD 1
 #endif
@@ -22,7 +22,7 @@
 // PHEAP_NATIVE_ALLOC
 // Use OS-native (VirtualAlloc or mmap) allocation functions.
 // If not defined, your code must implement the following functions:
-//    void *pheap_native_alloc(size_t n);
+//    void *pheap_native_alloc(size_t n, int exec);
 //    void pheap_native_destroy(void *p, size_t n);
 #ifndef PHEAP_NATIVE_ALLOC
 	#define PHEAP_NATIVE_ALLOC 1
@@ -42,6 +42,14 @@
 	#else
 		#define PHEAP_LOCK_PRIMITIVE PHEAP_PTHREAD_LOCK
 	#endif
+#endif
+
+#if PHEAP_LOCK_PRIMITIVE == PHEAP_CUSTOM_LOCK
+	#error Typedef your custom lock type here to pheap_lock_t. The functions below must also be implemented as they are referenced by pheap.c
+    // void pheap_init_native_lock(pheap_lock_t *lock);
+    // void pheap_uninit_native_lock(pheap_lock_t *lock);
+    // void pheap_lock_native_lock(pheap_lock_t *lock);
+    // void pheap_unlock_native_lock(pheap_lock_t *lock);
 #endif
 
 // PHEAP_INTERNAL_DEBUG
@@ -113,10 +121,10 @@
 #endif
 
 //
-// TODO Remove this constant in version 2.0 when add reserve+commit.
+// TODO Remove this constant in version 2.0 when we add reserve+commit.
 //
 #ifdef PHEAP_TEST
-	#define PHEAP_MEMBLOCK_SIZE_HINT 0x10000
+	#define PHEAP_MEMBLOCK_SIZE_HINT 0x4000
 #else
 	#define PHEAP_MEMBLOCK_SIZE_HINT 32 * 0x100000
 #endif
@@ -128,21 +136,27 @@ extern "C"
 
 typedef struct pheap * pheap_t;
 
+//
+// Flags passed to pheap_create.
+//
+#define PHEAP_FLAG_EXEC 0x01 // Allocate the heap as executable.
+
 #if PHEAP_LOCK_PRIMITIVE != PHEAP_NO_LOCK
-	#define PHEAP_FLAG_THREADSAFE 1
+	#define PHEAP_FLAG_THREADSAFE 0x02 // Make the heap thread-safe.
 #endif
 
+pheap_t pheap_create_fixed(void *memory, size_t size, uint32_t flags);
 pheap_t pheap_create(uint32_t flags);
 void pheap_destory(pheap_t h);
 
-void *pheap_alloc(pheap_t h, size_t n);
-void *pheap_zalloc(pheap_t h, size_t n);
-void *pheap_realloc(pheap_t h, void *p, size_t n);
+void *pheap_alloc(pheap_t h, size_t size);
+void *pheap_zalloc(pheap_t h, size_t size);
+void *pheap_realloc(pheap_t h, void *p, size_t size);
 void pheap_free(pheap_t h, void *p);
 
-void *pheap_g_alloc(size_t n);
-void *pheap_g_zalloc(size_t n);
-void *pheap_g_realloc(void *p, size_t n);
+void *pheap_g_alloc(size_t size);
+void *pheap_g_zalloc(size_t size);
+void *pheap_g_realloc(void *p, size_t size);
 void pheap_g_free(void *p);
 
 size_t pheap_msize(const void *p);

@@ -21,7 +21,7 @@ pheap_static_assert(sizeof(intptr_t) == sizeof(void *), bad_intptr_t);
 
 pheap_static_assert(0 != PHEAP_ALIGNMENT, bad_alignment);
 
-pheap_static_assert(PHEAP_PAGE_SIZE < PHEAP_MEMBLOCK_SIZE_HINT, hint_too_small);
+pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small);
 
 //
 // Solve compiler and architecture
@@ -54,7 +54,7 @@ pheap_static_assert(PHEAP_PAGE_SIZE < PHEAP_MEMBLOCK_SIZE_HINT, hint_too_small);
     static uint32_t bitscan_forward32(uint32_t v)
     {
         uint32_t tmp;
-        _BitScanForward(&tmp, v);
+        _BitScanForward((unsigned long *)&tmp, v);
         return tmp;
     }
 
@@ -126,9 +126,10 @@ pheap_static_assert(PHEAP_PAGE_SIZE < PHEAP_MEMBLOCK_SIZE_HINT, hint_too_small);
 
 #if PHEAP_NATIVE_ALLOC == 1
     #if defined(PHEAP_WIN)
-    static void *pheap_native_alloc(size_t n)
+    static void *pheap_native_alloc(size_t n, int exec)
     {
-        return VirtualAlloc(PHEAP_NULL, n, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        DWORD prot = exec ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+        return VirtualAlloc(PHEAP_NULL, n, MEM_COMMIT | MEM_RESERVE, prot);
     }
 
     static void pheap_native_destroy(void *p, size_t n)
@@ -150,9 +151,14 @@ pheap_static_assert(PHEAP_PAGE_SIZE < PHEAP_MEMBLOCK_SIZE_HINT, hint_too_small);
     //
     // Assume everything but Windows has mmap()
     //
-    static void *pheap_native_alloc(size_t n)
+    static void *pheap_native_alloc(size_t n, int exec)
     {
-        return mmap(0, n, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        int prot = PROT_READ|PROT_WRITE;
+        if(exec)
+        {
+            prot |= PROT_EXEC;
+        }
+        return mmap(0, n, prot, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     }
     static void pheap_native_destroy(void *p, size_t n)
     {
@@ -165,9 +171,11 @@ pheap_static_assert(PHEAP_PAGE_SIZE < PHEAP_MEMBLOCK_SIZE_HINT, hint_too_small);
         #error Unknown OS. No idea how to generate native allocation primitives.
     #endif
 #else // !PHEAP_NATIVE_ALLOC
-    void *pheap_native_alloc(size_t n);
+    void *pheap_native_alloc(size_t n, int exec);
     void pheap_native_destroy(void *p, size_t n);
 #endif // PHEAP_NATIVE_ALLOC
+
+#define pheap_is_exec(flags) (((flags) & PHEAP_FLAG_EXEC) ? 1 : 0)
 
 #if PHEAP_LOCK_PRIMITIVE != PHEAP_NO_LOCK
     #define PHEAP_USE_LOCKS
@@ -196,29 +204,18 @@ pheap_static_assert(PHEAP_PAGE_SIZE < PHEAP_MEMBLOCK_SIZE_HINT, hint_too_small);
     #define pheap_lock_native_lock(lock)   pheap_lock_internal_lock(lock)
     #define pheap_unlock_native_lock(lock) pheap_unlock_internal_lock(lock)
 #elif PHEAP_LOCK_PRIMITIVE == PHEAP_CUSTOM_LOCK
-    //
-    // To use your custom locks, typedef your lock type to pheap_lock_t
-    // then implement the defines below. They all receive a single
-    // 'pheap_lock_t *lock' as argument.
-    //
-    #ifndef pheap_init_native_lock
-        #error To use custom locks, define pheap_init_native_lock (will receive a ptr to your lock type)
-    #endif
-    #ifndef pheap_uninit_native_lock
-        #error To use custom locks, define pheap_uninit_native_lock (will receive a ptr to your lock type)
-    #endif
-    #ifndef pheap_lock_native_lock
-        #error To use custom locks, define pheap_lock_native_lock (will receive a ptr to your lock type)
-    #endif
-    #ifndef pheap_unlock_native_lock
-        #error To use custom locks, define pheap_unlock_native_lock (will receive a ptr to your lock type)
-    #endif
+    void pheap_init_native_lock(pheap_lock_t *lock);
+    void pheap_uninit_native_lock(pheap_lock_t *lock);
+    void pheap_lock_native_lock(pheap_lock_t *lock);
+    void pheap_unlock_native_lock(pheap_lock_t *lock);
 #endif
 
-#define PHEAP_FLAG_IN_USE   0x80000000
-#define PHEAP_FLAG_IS_HUGE  0x40000000
-#define PHEAP_SIZE_MASK     0x0FFFFFFF
-#define PHEAP_SIZE_BITS     (32-4)
+// Internal heap flags
+#define PHEAP_FLAG_FIXED    0x80000000
+//
+#define PHEAP_AFLAG_IN_USE  0x80
+#define PHEAP_AFLAG_IS_HUGE 0x40
+#define PHEAP_SIZE_MASK     ((uint32_t)(~(PHEAP_AFLAG_IN_USE|PHEAP_AFLAG_IS_HUGE)))
 
 #define PHEAP_MAX_FREEBIN_SCANS 8
 
@@ -226,8 +223,10 @@ pheap_static_assert(PHEAP_PAGE_SIZE < PHEAP_MEMBLOCK_SIZE_HINT, hint_too_small);
 
 typedef uint8_t pheap_hash_t;
 
+#define PHEAP_SIZE_BITS         (32)
+#define PHEAP_NORMAL_SIZE_BITS  (PHEAP_SIZE_BITS-4)
 #define PHEAP_MEMBLOCK_BUCKETS  (1<<sizeof(pheap_hash_t))
-#define PHEAP_HUGE_SIZE_MASK    ((((size_t)0) - ((size_t)1)) & ~((size_t)PHEAP_SIZE_MASK))
+#define PHEAP_HUGE_SIZE_MASK    (~((((size_t)1) << ((size_t)PHEAP_NORMAL_SIZE_BITS)) - ((size_t)1)))
 #define PHEAP_ALLOC_OBJ_SIZE    ((int32_t)pheap_roundup2(sizeof(pheap_allocation_free_t), PHEAP_ALIGNMENT))
 #define PHEAP_FREE_DIFF         ((int32_t)(PHEAP_ALLOC_OBJ_SIZE - pheap_roundup2(sizeof(pheap_allocation_t), PHEAP_ALIGNMENT)))
 #define PHEAP_PAGE_MASK         (~((size_t)(PHEAP_PAGE_SIZE - 1)))
@@ -253,12 +252,13 @@ typedef struct pheap_allocation
 {
     struct pheap_allocation *prev;
     // When allocated, requested allocation size
-    // When free, size of entire allocation.
+    // When free, size of entire allocation block including header.
     int32_t size;
     pheap_hash_t mem_bucket;
+    // Holds flag as well as:
     // When allocated, add this with size to get allocation size
     // When free, always zero
-    int8_t extra_size;
+    uint8_t extra;
 }
 pheap_allocation_t;
 
@@ -403,12 +403,10 @@ pheap_inline static uint32_t size_to_index(int32_t nv, int32_t *bucket_upper_bou
     n |= n >> 8;
     n |= n >> 16;
     n++;
-
     if(bucket_upper_bound)
     {
         *bucket_upper_bound = (int32_t)n;
     }
-
     return bitscan_forward32(n);
 }
 
@@ -441,7 +439,7 @@ pheap_inline static void unlink_free_list(pheap_free_list_t *list, pheap_allocat
 pheap_inline static void unlink_free(pheap_t h, void *ptr)
 {
     pheap_allocation_free_t *f = (pheap_allocation_free_t *)ptr;
-    unlink_free_list(h->free_list + size_to_index(f->allocation.size & PHEAP_SIZE_MASK, PHEAP_NULL), f);
+    unlink_free_list(h->free_list + size_to_index(f->allocation.size, PHEAP_NULL), f);
 }
 
 pheap_inline static void free_insert_after(pheap_free_list_t *dlist, pheap_allocation_free_t *after, pheap_allocation_free_t *ins)
@@ -494,17 +492,19 @@ pheap_inline static void make_free(void *a)
 {
     pheap_allocation_free_t *f = a;
 
-    if(f->allocation.size & PHEAP_FLAG_IN_USE)
+    pheap_assert(0 == (f->allocation.extra & PHEAP_AFLAG_IS_HUGE),
+        "Huge pages should never be here.");
+
+    if(f->allocation.extra & PHEAP_AFLAG_IN_USE)
     {
-        f->allocation.size &= PHEAP_SIZE_MASK;
-        f->allocation.size += f->allocation.extra_size;
-        f->allocation.extra_size = 0;
+        f->allocation.size += f->allocation.extra & PHEAP_SIZE_MASK;
+        f->allocation.extra = 0;
     }
 }
 
 pheap_inline static int32_t get_full_alloc_size(const pheap_allocation_t *a)
 {
-    return ((a->size & PHEAP_SIZE_MASK) + a->extra_size);
+    return a->size + (a->extra & PHEAP_SIZE_MASK);
 }
 
 pheap_inline static void merge_free(void *keep, void *merge)
@@ -553,9 +553,12 @@ pheap_inline static pheap_allocation_t *unchecked_allocate(pheap_memblock_t *mem
     a = (pheap_allocation_t *)mem->unused;
     mem->unused += alloc_size;
 
+    pheap_assert(0 == ((alloc_size - size) & ~PHEAP_SIZE_MASK),
+        "Size expands into flags, something is very wrong");
+
     a->prev = mem->prev_alloc;
-    a->size = (size | PHEAP_FLAG_IN_USE);
-    a->extra_size = (alloc_size - size);
+    a->size = size;
+    a->extra = (uint8_t)((alloc_size - size) | PHEAP_AFLAG_IN_USE);
 
     a->mem_bucket = (hash_pointer(mem) % PHEAP_MEMBLOCK_BUCKETS);
 
@@ -643,8 +646,12 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
     ssize_t alloc_size;
     pheap_memblock_t *mem;
     pheap_allocation_t *a = PHEAP_NULL;
-
     int32_t req_size = required_alloc_size(size);
+
+    if(h->flags & PHEAP_FLAG_FIXED)
+    {
+        return PHEAP_NULL;
+    }
 
     if(PHEAP_NULL != (a = allocate_from_existing(h, size, req_size)))
     {
@@ -670,7 +677,7 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
         alloc_size = pheap_roundup2(alloc_size, PHEAP_MEMBLOCK_SIZE_HINT);
     }
 
-    if(PHEAP_NULL != (mem = pheap_native_alloc(alloc_size)))
+    if(PHEAP_NULL != (mem = pheap_native_alloc(alloc_size, pheap_is_exec(h->flags))))
     {
         memblock_init(h, mem, alloc_size);
         a = unchecked_allocate(mem, size, req_size);
@@ -699,13 +706,13 @@ static void merge_with_right(pheap_t h, void *left, void *right)
 {
     pheap_allocation_t *next;
 
-    pheap_assert(!(((pheap_allocation_t *)right)->size & PHEAP_FLAG_IN_USE), "Cant merge right with used block");
+    pheap_assert(!(((pheap_allocation_t *)right)->extra & PHEAP_AFLAG_IN_USE), "Cant merge right with used block");
 
     unlink_free(h, right);
     merge_free(left, right);
 
     next = pheap_next_allocation(left);
-    pheap_assert(next->size & PHEAP_FLAG_IN_USE, 
+    pheap_assert(next->extra & PHEAP_AFLAG_IN_USE, 
         "Object following end-merge is not in use, this should be impossible.\n");
     pheap_assert(next->prev != PHEAP_LIST_END,
         "This must be possible? Wont that break everything??");
@@ -729,14 +736,17 @@ static pheap_allocation_t *claim_free_bin(pheap_t h, pheap_free_list_t *list, ph
         //
         next = pheap_next_allocation(&f->allocation);
 
-        f->allocation.size = PHEAP_FLAG_IN_USE | size;
-        f->allocation.extra_size = req_size - size;
+        pheap_assert(0 == ((req_size - size) & ~PHEAP_SIZE_MASK),
+            "Size expands into flags, something is very wrong");
+    
+        f->allocation.size = size;
+        f->allocation.extra = (uint8_t)((req_size - size) | PHEAP_AFLAG_IN_USE);
 
         split = pheap_next_allocation(&f->allocation);
 
         split->allocation.prev = &f->allocation;
         split->allocation.size = trailing_bytes;
-        split->allocation.extra_size = 0;
+        split->allocation.extra = 0;
         split->allocation.mem_bucket = f->allocation.mem_bucket;
 
         next = pheap_next_allocation(&split->allocation);
@@ -747,7 +757,7 @@ static pheap_allocation_t *claim_free_bin(pheap_t h, pheap_free_list_t *list, ph
         }
         else
         {
-            pheap_assert((next->size & PHEAP_FLAG_IN_USE), "What???");
+            pheap_assert((next->extra & PHEAP_AFLAG_IN_USE), "What???");
 
             next->prev = &split->allocation;
             release_allocation(h, split);
@@ -755,8 +765,11 @@ static pheap_allocation_t *claim_free_bin(pheap_t h, pheap_free_list_t *list, ph
     }
     else
     {
-        f->allocation.extra_size = (f->allocation.size - size);
-        f->allocation.size = PHEAP_FLAG_IN_USE | size;
+        pheap_assert(0 == ((f->allocation.size - size) & ~PHEAP_SIZE_MASK),
+            "Size expands into flags, something is very wrong");
+
+        f->allocation.extra = (uint8_t)((f->allocation.size - size) | PHEAP_AFLAG_IN_USE);
+        f->allocation.size = size;
     }
     return (pheap_allocation_t *)f;
 }
@@ -769,6 +782,7 @@ static pheap_allocation_t *allocate_from_free_bin(pheap_t h, int32_t size)
 
     uint32_t i = 0;
     int32_t upper;
+    uint32_t free_buckets;
 
     uint32_t index = size_to_index(req_size, &upper);
     pheap_free_list_t *list = (h->free_list + index);
@@ -803,7 +817,16 @@ static pheap_allocation_t *allocate_from_free_bin(pheap_t h, int32_t size)
         }
     }
 
-    for(i = (index + 1); i < PHEAP_SIZE_BITS; ++i)
+    free_buckets = PHEAP_NORMAL_SIZE_BITS;
+    if(h->flags & PHEAP_FLAG_FIXED)
+    {
+        //
+        // In fixed-mode, there are no huge pages and all buckets are used for the heap.
+        //
+        free_buckets = PHEAP_SIZE_BITS;
+    }
+
+    for(i = (index + 1); i < free_buckets; ++i)
     {
         list = (h->free_list + i);
         if(list->tail)
@@ -885,34 +908,45 @@ void *pheap_alloc(pheap_t h, size_t n)
 {
     pheap_allocation_t *a;
 
-    if((n & PHEAP_HUGE_SIZE_MASK)
-    || ((n + sizeof(pheap_allocation_free_t)) & PHEAP_HUGE_SIZE_MASK))
+    if(!(h->flags & PHEAP_FLAG_FIXED))
     {
-        uint8_t *ptr;
-        pheap_huge_allocation_t *huge;
-        size_t rounded = pheap_roundup2(n, PHEAP_PAGE_SIZE);
-
-        if(rounded < n)
+        if((n & PHEAP_HUGE_SIZE_MASK)
+        || ((n + sizeof(pheap_allocation_free_t)) & PHEAP_HUGE_SIZE_MASK))
         {
-            return PHEAP_NULL;
+            uint8_t *ptr;
+            pheap_huge_allocation_t *huge;
+            size_t rounded = pheap_roundup2(n, PHEAP_PAGE_SIZE);
+
+            if(rounded < n)
+            {
+                return PHEAP_NULL;
+            }
+            if(PHEAP_NULL == (ptr = pheap_native_alloc(rounded + PHEAP_PAGE_SIZE, pheap_is_exec(h->flags))))
+            {
+                return PHEAP_NULL;
+            }
+
+            a = pheap_mem_to_obj(ptr + PHEAP_PAGE_SIZE);
+
+            huge = pheap_obj_to_huge(a);
+            huge->huge_size = n;
+
+            huge->allocation.size = 0;
+            huge->allocation.prev = PHEAP_NULL;
+            huge->allocation.extra = PHEAP_AFLAG_IN_USE | PHEAP_AFLAG_IS_HUGE;
+            huge->allocation.mem_bucket = 0;
+            
+            link_huge_alloc(h, huge);
+            return (ptr + PHEAP_PAGE_SIZE);
         }
-        if(PHEAP_NULL == (ptr = pheap_native_alloc(rounded + PHEAP_PAGE_SIZE)))
-        {
-            return PHEAP_NULL;
-        }
-
-        a = pheap_mem_to_obj(ptr + PHEAP_PAGE_SIZE);
-
-        huge = pheap_obj_to_huge(a);
-        huge->huge_size = n;
-
-        huge->allocation.size = PHEAP_FLAG_IN_USE | PHEAP_FLAG_IS_HUGE;
-        huge->allocation.prev = PHEAP_NULL;
-        huge->allocation.extra_size = 0;
-        huge->allocation.mem_bucket = 0;
-        
-        link_huge_alloc(h, huge);
-        return (ptr + PHEAP_PAGE_SIZE);
+    }
+    else if(n >= 0xFFFFFF00)
+    {
+        //
+        // Due to the internal allocation structures only huge-allocs can be >32-bits.
+        // This puts a 32-bit limitation on PHEAP_FLAG_FIXED that cant allocate huge pages.
+        //
+        return PHEAP_NULL;
     }
 
     pheap_lock(h);
@@ -977,11 +1011,11 @@ void pheap_free(pheap_t h, void *p)
     }
 
     // todo assert fix and so on
-    if(0 == (PHEAP_FLAG_IN_USE & a->size))
+    if(0 == (PHEAP_AFLAG_IN_USE & a->extra))
     {
         pheap_impossible("Object being free is not in use (or not a pheap allocation)\n");
     }
-    else if(PHEAP_FLAG_IS_HUGE & a->size)
+    else if(PHEAP_AFLAG_IS_HUGE & a->extra)
     {
         void *ptr;
         pheap_huge_allocation_t *huge = pheap_obj_to_huge(a);
@@ -1007,7 +1041,7 @@ void pheap_free(pheap_t h, void *p)
         // or:
         // [USED] [THIS] [????]
         //
-        if(0 == (prev->size & PHEAP_FLAG_IN_USE))
+        if(0 == (prev->extra & PHEAP_AFLAG_IN_USE))
         {
             //
             // [FREE] [THIS] ---> [THIS    ]
@@ -1035,7 +1069,7 @@ void pheap_free(pheap_t h, void *p)
         release_to_memblock_end(h, prev, a);
         goto cleanup;
     }
-    else if(0 == (PHEAP_FLAG_IN_USE & next->size))
+    else if(0 == (PHEAP_AFLAG_IN_USE & next->extra))
     {
         merge_with_right(h, a, next);
     }
@@ -1054,37 +1088,63 @@ cleanup:
 size_t pheap_msize(const void *p)
 {
     const pheap_allocation_t *a = pheap_mem_to_obj(p);
-    if(PHEAP_FLAG_IS_HUGE & a->size)
+    if(PHEAP_AFLAG_IS_HUGE & a->extra)
     {
         return pheap_obj_to_huge(a)->huge_size;
     }
-    return a->size & PHEAP_SIZE_MASK;
+    return a->size;
+}
+
+static pheap_inline pheap_t init_pheap(void *ptr, size_t n, uint32_t flags)
+{
+    pheap_t h = ptr;
+    pheap_memblock_t *mb;
+
+    pheap_memset(h, 0, sizeof(*h));
+
+    h->flags = flags;
+    pheap_init_lock(h);
+
+    mb = (pheap_memblock_t *)(((uint8_t *)ptr) + pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT));
+    memblock_init(h, mb, n - pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT));
+
+    return h;
+}
+
+pheap_t pheap_create_fixed(void *memory, size_t size, uint32_t flags)
+{
+    pheap_t h;
+    pheap_memblock_t *mb;
+
+    size_t min_size = pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT) 
+                    + pheap_roundup2(sizeof(*mb), PHEAP_ALIGNMENT);
+
+    if(size < min_size)
+    {
+        // Too small to host control structures
+        return PHEAP_NULL;
+    }
+    if(flags & PHEAP_FLAG_EXEC)
+    {
+        // Missleading if set. The protection is whatever you set the memory to be.
+        return PHEAP_NULL;
+    }
+
+    return init_pheap(memory, size, flags | PHEAP_FLAG_FIXED);
 }
 
 pheap_t pheap_create(uint32_t flags)
 {
-    pheap_t h;
-    uint8_t *p;
-    pheap_memblock_t *mb;
+    void *ptr;
     size_t size = PHEAP_MEMBLOCK_SIZE_HINT;
 
-    if(0 == (h = pheap_native_alloc(size)))
+    if(0 == (ptr = pheap_native_alloc(size, pheap_is_exec(flags))))
     {
         // 
         return PHEAP_NULL;
     }
 
-    pheap_memset(h, 0, sizeof(*p));
-
-    h->flags = flags;
-    pheap_init_lock(h);
-
-    p = (uint8_t *)h;
-    mb = (pheap_memblock_t *)(p + pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT));
-
-    memblock_init(h, mb, size - pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT));
-
-    return h;
+    return init_pheap(ptr, size, flags & ~PHEAP_FLAG_FIXED);
 }
 
 void pheap_destory(pheap_t h)
@@ -1093,6 +1153,11 @@ void pheap_destory(pheap_t h)
     pheap_huge_allocation_t *huge;
 
     pheap_uninit_lock(h);
+
+    if(h->flags & PHEAP_FLAG_FIXED)
+    {
+        return;
+    }
 
     huge = h->huge_list.head;
     while(huge)
