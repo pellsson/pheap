@@ -34,6 +34,7 @@
 #define PHEAP_WIN32_LOCK 1		// Use native win32-lock (CRITICAL_SECTION)
 #define PHEAP_PTHREAD_LOCK 2	// Use pthread_mutex_t
 #define PHEAP_INTERNAL_LOCK 3	// Use cross-platform internal spinlock
+#define PHEAP_CUSTOM_LOCK 4		// Use your own lock implementation. See pheap.c for information on how.
 
 #ifndef PHEAP_LOCK_PRIMITIVE
 	#ifdef _WIN32
@@ -94,14 +95,21 @@
 	#define PHEAP_NULL		NULL
 #else
 	#error If you dont have a C-runtime, you must manually implement the PHEAP requirements.
+	//
 	// ### PHEAP requirements ###
+	//
 	// PHEAP_NULL - Invalid pointer address, usually 0
 	// pheap_memset - void *pheap_memset(void * ptr, int value, size_t num) (return value not used).
 	// pheap_memcpy - void *pheap_memcpy(void * dest, const void *src, size_t n) (return value not used).
 	// size_t - Integer big enough to hold biggest possible allocation.
 	// And the stdint.h types:
 	//    uint8_t, uint16_t, uint32_t, uint64_t, uintptr_t
-	//    int8_t, int16_t, int32_t, int64_t, intptr_6
+	//    int8_t, int16_t, int32_t, int64_t, intptr_t
+	//
+	// Optionally, if you use PHEAP_INTERNAL_LOCK, you can define
+	// pheap_yield (commonly a sleep(0)) which will greatly increase
+	// performance (and reduce cpu-usage) on the internal locks.
+	//
 #endif
 
 //
