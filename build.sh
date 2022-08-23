@@ -25,11 +25,11 @@ else
 	CFLAGS="$CFLAGS -O3"
 fi
 
-echo "Building PHEAP ($CC)"
+echo "Building pheap static library ($CC)"
 do_verbose "mkdir -p $OBJDIR"
 do_verbose "$CC $CFLAGS pheap.c -o $OBJDIR/pheap.o -c"
 do_verbose "$AR crs libpheap.a $OBJDIR/pheap.o"
-echo "Building PHEAP tests ($CXX)"
+echo "Building pheap tests ($CXX)"
 do_verbose "$CC $TEST_DEFS $CFLAGS pheap.c -o $OBJDIR/pheap-test.o -c"
 do_verbose "$CXX $TEST_DEFS $CFLAGS test/test.cpp $OBJDIR/pheap-test.o -o pheap-test"
 
