@@ -48,7 +48,6 @@ static void test_alloc_free(pheap_t h, uint32_t seed)
 		std::make_pair(0x0, 0x1000),
 	};
 	
-
 	do
 	{
 		srand(seed);
@@ -79,16 +78,21 @@ static void test_alloc_free(pheap_t h, uint32_t seed)
 	while(std::next_permutation(free_order.begin(), free_order.end()));
 }
 
+static int pass = 0;
+
 static void test_many_pools(pheap_t h)
 {
 	int32_t n_bytes = 0;
-
 	std::vector<std::pair<void *, int32_t>> allocs;
+
+	pass = 0;
 
 	for(int i = 0; i < 2000; ++i)
 	{
 		int32_t n = 0;
 		size_t action = rand_between(0, 10);
+
+		pass += 1;
 
 		if(n_bytes >= (0x20 * PHEAP_MEMBLOCK_SIZE_HINT))
 		{
@@ -160,6 +164,38 @@ static void test_many_pools(pheap_t h)
 	test_true((bool)pheap_test_is_pristine(h));
 }
 
+#if 0
+#include <windows.h>
+
+static void find_best_fault_order()
+{
+	int best_seed = -1;
+	int min_pass = 123123123;
+
+	for(int seedz = 0;; ++seedz)
+	{
+		srand(seedz);
+
+		__try
+		{
+			test_many_pools(heap);
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER)
+		{
+			if(pass < min_pass)
+			{
+				best_seed = seedz;
+				min_pass = pass;
+				printf("New best: %d, %d\n", best_seed, min_pass);
+			}
+		}
+
+		heap = pheap_create(0);
+	}
+}
+
+#endif
+
 int main()
 {
 #ifdef PHEAP_FLAG_THREADSAFE
@@ -176,7 +212,6 @@ int main()
 	}
 
 	printf("Testing with random seed: %d\n", n);
-
 	srand(n);
 
 	pheap_free(heap, nullptr);
