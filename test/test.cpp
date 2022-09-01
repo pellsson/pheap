@@ -20,6 +20,7 @@
 	{ \
 		std::cout << "FAILS (Line: " << __LINE__ << "): " << #lhs " " #op " " #rhs << std::endl; \
 		std::cout << "LHS " << (lv) << ", RHS " << (rv) << std::endl; \
+		__debugbreak(); \
 		exit(1); \
 	} \
 }
@@ -164,6 +165,119 @@ static void test_many_pools(pheap_t h)
 	test_true((bool)pheap_test_is_pristine(h));
 }
 
+static void test_realloc(pheap_t h)
+{
+	void *a;
+	void *b;
+	void *c;
+	test_true((bool)pheap_test_is_pristine(h));
+	test_true(NULL != (a = pheap_realloc(h, NULL, 0x123)));
+	memset(a, 'a', 0x123);
+	pheap_free(h, a);
+	test_true((bool)pheap_test_is_pristine(h));
+	a = pheap_realloc(h, NULL, 0x123);
+	//memset(a, 'a', 0x123);
+	//test_true(a == pheap_realloc(h, a, 0x124));
+	//memset(a, 'b', 0x124);
+	//test_true(a == pheap_realloc(h, a, 0x123));
+	//memset(a, 'c', 0x123);
+	test_true(NULL != (b = pheap_realloc(h, NULL, 0x1000)));
+	memset(b, 'd', 0x1000);
+	test_true(NULL != (c = pheap_realloc(h, NULL, 0x1000)));
+	memset(c, 'e', 0x1000);
+	pheap_free(h, b);
+	test_true(a == pheap_realloc(h, a, 0x1000 + 0x123));
+	memset(a, 'f', 0x1000+123);
+	pheap_free(h, c);
+	pheap_free(h, a);
+	test_true((bool)pheap_test_is_pristine(h));
+
+	std::vector<std::pair<void *, size_t>> allocs;
+	
+	int32_t size_range = 0x20000;
+
+	for(int i = 0; i < 2; ++i)
+	{
+		int32_t size_dir = (0 == i) ? -1 : 1;
+		int32_t curr_size = size_range / 2;
+
+		allocs.push_back(std::make_pair(pheap_alloc(h, 0x1000), 0x1000));
+		test_true(NULL != (a = pheap_realloc(h, NULL, curr_size), curr_size));
+		allocs.push_back(std::make_pair(pheap_alloc(h, 0x1000), 0x1000));
+
+		//printf("First:  %p\n", allocs.front().first);
+		//printf("Relloc: %p\n", a);
+		//printf("Last:   %p\n", allocs.back().first);
+		//printf("Direction: %d\n", size_dir);
+
+		while(curr_size > 0 && curr_size < size_range)
+		{
+			int r = rand();
+
+			curr_size += (int32_t)rand_between(0, 0x80) * size_dir;
+
+			if(curr_size < 0)
+			{
+				curr_size = 0;
+			}
+			else if(curr_size > size_range)
+			{
+				curr_size = size_range;
+			}
+
+			if(r & 0x03)
+			{
+				void *old = a;
+				a = pheap_realloc(h, a, curr_size);
+				// printf(".");
+				test_true(a != NULL);
+				if(size_dir < 0)
+				{
+					test_true(old == a);
+				}
+				memset(a, 'x', curr_size);
+			}
+			else
+			{
+				if(rand() & 0x01)
+				{
+					if(allocs.size())
+					{
+						auto index = rand() % allocs.size();
+						auto &r = allocs[index];
+						size_t size_now = pheap_msize(r.first);
+						test_true(r.second == size_now);
+						// printf("Free: %p\n", r.first);
+						pheap_free(h, r.first);
+						allocs.erase(allocs.begin() + index);
+					}
+				}
+				else
+				{
+					if(allocs.size() < 0x200)
+					{
+						size_t n = rand_between(0, 0x100);
+						allocs.push_back(std::make_pair(pheap_alloc(h, n), n));
+						const auto &back = allocs.back();
+						test_true(NULL != back.first && n == pheap_msize(back.first));
+					}
+				}
+			}
+		}
+
+		for(auto &x : allocs)
+		{
+			test_true(pheap_msize(x.first) == x.second);
+			pheap_free(h, x.first);
+		}
+
+		pheap_free(h, a);
+
+		test_true((bool)pheap_test_is_pristine(h));
+		allocs.clear();
+	}
+}
+
 #if 0
 #include <windows.h>
 
@@ -203,85 +317,106 @@ int main()
 #else
 	uint32_t flags = 0;
 #endif
-	pheap_t heap = pheap_create(flags);
-	uint32_t n = (uint32_t)time(0);
+	uint32_t num_tests = 1;
+	uint32_t seed = (uint32_t)time(0);
 
 	if(getenv("TEST_SEED"))
 	{
-		n = atoi(getenv("TEST_SEED"));
+		seed = atoi(getenv("TEST_SEED"));
 	}
 
-	printf("Testing with random seed: %d\n", n);
-	srand(n);
-
-	pheap_free(heap, nullptr);
-
-	printf("Testing huge allocations...\n");
-	void *a = pheap_alloc(heap, 0x10000000);
-	void *b = pheap_alloc(heap, 0x10000000);
-	void *c = pheap_alloc(heap, 0x10000000);
-
-	test_true(!pheap_test_is_pristine(heap));
-	pheap_free(heap, b);
-	test_true(!pheap_test_is_pristine(heap));
-	pheap_free(heap, c);
-	test_true(!pheap_test_is_pristine(heap));
-	pheap_free(heap, a);
-	test_true((bool)pheap_test_is_pristine(heap));
-
-	printf("Testing variations of alloc vs. free order...\n");
-	for(uint32_t i = 0; i < 0x100; ++i)
+	if(getenv("NUM_TESTS"))
 	{
-		test_alloc_free(heap, rand() + i);
+		num_tests = atoi(getenv("NUM_TESTS"));
 	}
 
-	printf("Testing a lot of memory pools...\n");
-	for(uint32_t i = 0; i < 0x800; ++i)
+	for(uint32_t i = 0; i < num_tests; ++i)
 	{
-		test_many_pools(heap);
-	}
+		printf("Testing with random seed: %d\n", seed);
+		srand(seed);
+		seed = rand();
+
+		pheap_t heap = pheap_create(flags);
+		pheap_free(heap, nullptr);
+
+		printf("Testing huge allocations...\n");
+		void *a = pheap_alloc(heap, 0x10000000);
+		void *b = pheap_alloc(heap, 0x10000000);
+		void *c = pheap_alloc(heap, 0x10000000);
+
+		test_true(!pheap_test_is_pristine(heap));
+		pheap_free(heap, b);
+		test_true(!pheap_test_is_pristine(heap));
+		pheap_free(heap, c);
+		test_true(!pheap_test_is_pristine(heap));
+		pheap_free(heap, a);
+		test_true((bool)pheap_test_is_pristine(heap));
+
+		printf("Testing variations of alloc vs. free order...\n");
+		for(uint32_t i = 0; i < 0x100; ++i)
+		{
+			test_alloc_free(heap, rand() + i);
+		}
+
+		printf("Testing a lot of memory pools...\n");
+		for(uint32_t i = 0; i < 0x800; ++i)
+		{
+			test_many_pools(heap);
+		}
+
+		printf("Testing realloc()\n");
+		for(uint32_t i = 0; i < 0x1000; ++i)
+		{
+			test_realloc(heap);
+		}
 
 #ifdef PHEAP_FLAG_THREADSAFE
-	std::vector<std::thread> threads;
-	printf("Testing concurrent allocations against same heap...\n");
-	for(uint32_t i = 0; i < 64; ++i)
-	{
-		threads.push_back(std::thread([i, heap]()
+		std::vector<std::thread> threads;
+		printf("Testing concurrent allocations against same heap...\n");
+		for(uint32_t i = 0; i < 64; ++i)
 		{
-			for(uint32_t x = 0; x < 0x8000; ++x)
+			threads.push_back(std::thread([i, heap]()
 			{
-				size_t n = rand() % 0x2000;
-				void *p = pheap_alloc(heap, n);
-				test_true(p != nullptr);
-				memset(p, i, n);
-				test_true(n == pheap_msize(p));
-				pheap_free(heap, p);
-			}
-		}));
-	}
+				for(uint32_t x = 0; x < 0x6000; ++x)
+				{
+					size_t n = rand() % 0x2000;
+					void *p = pheap_alloc(heap, n);
+					test_true(p != nullptr);
+					memset(p, i, n);
+					test_true(n == pheap_msize(p));
+					n = (rand() & 0x01) ? n / 2 : n + 200;
+					p = pheap_realloc(heap, p, n);
+					test_true(p != nullptr);
+					memset(p, i, n);
+					test_true(n == pheap_msize(p));
+					pheap_free(heap, p);
+				}
+			}));
+		}
 
-	for(auto &t : threads)
-	{
-		t.join();
-	}
+		for(auto &t : threads)
+		{
+			t.join();
+		}
 
-	test_true((bool)pheap_test_is_pristine(heap));
+		test_true((bool)pheap_test_is_pristine(heap));
 #endif
 
-	printf("Destroying heap...\n");
-	pheap_destory(heap);
+		printf("Destroying heap...\n");
+		pheap_destory(heap);
 
 #if PHEAP_USE_GLOBAL_HEAP != 0
-	printf("Testing global heap...\n");
-	void *p = pheap_g_alloc(0x1000);
-	test_true(PHEAP_NULL != p);
-	pheap_g_free(p);
-	void *q = pheap_g_alloc(0x1000);
-	test_true(p == q);
-	pheap_g_free(q);
+		printf("Testing global heap...\n");
+		void *p = pheap_g_alloc(0x1000);
+		test_true(PHEAP_NULL != p);
+		pheap_g_free(p);
+		void *q = pheap_g_alloc(0x1000);
+		test_true(p == q);
+		pheap_g_free(q);
 #endif
 
-	printf("Test successful!\n");
+		printf("Test successful!\n");
+	}
 
 	return 0;
 }
