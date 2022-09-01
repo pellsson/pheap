@@ -16,6 +16,9 @@ function do_verbose() {
 rm -fr $OBJDIR
 
 if [ "$1" = "clean" ]; then
+	rm -f libpheap.a
+	rm -fr obj/
+	rm -f pheap-test
 	exit 0
 fi
 
