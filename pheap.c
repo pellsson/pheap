@@ -215,7 +215,9 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
 //
 #define PHEAP_AFLAG_IN_USE  0x80
 #define PHEAP_AFLAG_IS_HUGE 0x40
-#define PHEAP_SIZE_MASK     ((uint32_t)(~(PHEAP_AFLAG_IN_USE|PHEAP_AFLAG_IS_HUGE)))
+
+#define PHEAP_MAX_EXTRA_SIZE    0x3F
+#define PHEAP_EXTRA_SIZE_MASK   ((uint32_t)(~(PHEAP_AFLAG_IN_USE|PHEAP_AFLAG_IS_HUGE)))
 
 #define PHEAP_MAX_FREEBIN_SCANS 8
 
@@ -233,7 +235,7 @@ typedef uint8_t pheap_hash_t;
 
 #define pheap_roundup2(val, by) (((val) + ((by) - 1)) & (~((by) - 1)))
 
-#define pheap_next_allocation(a)        (void *)(((uint8_t *)a) + get_full_alloc_size(a));
+#define pheap_next_allocation(a)        (void *)(((uint8_t *)a) + get_full_alloc_size(a))
 // TODO : I think this is wrong...?
 #define pheap_search_dir_forward(n, s)  ((n > ((s) - (((s) - ((s) >> 1)) / 2))) ? 1 : 0)
 
@@ -321,6 +323,8 @@ struct pheap
     pheap_free_list_t free_list[PHEAP_SIZE_BITS];
 };
 
+pheap_static_assert((PHEAP_ALLOC_OBJ_SIZE * 2) <= (PHEAP_EXTRA_SIZE_MASK + 1), object_too_big);
+
 pheap_inline static void pheap_lock_internal_lock(pheap_internal_lock_t *lock)
 {
     while(pheap_atomic_testandset(lock, 1))
@@ -375,7 +379,7 @@ static pheap_inline pheap_hash_t hash_pointer(const void *p)
     return (pheap_hash_t)(((uintptr_t)p) / PHEAP_MEMBLOCK_SIZE_HINT);
 }
 
-#if PHEAP_INTERNAL_DEBUG == 0
+#if PHEAP_INTERNAL_DEBUG == 1
     #include <stdio.h>
     #include <stdlib.h>
     #define pheap_impossible(...) \
@@ -392,6 +396,15 @@ static pheap_inline pheap_hash_t hash_pointer(const void *p)
     #define pheap_assert(x, s)
 #endif
 
+pheap_inline static void set_allocated_size(pheap_allocation_t *a, int32_t size, int32_t alloc_size)
+{
+    pheap_assert(size < alloc_size, "Size is smaller than allocation size...");
+    pheap_assert((alloc_size - size) <= PHEAP_MAX_EXTRA_SIZE,
+        "Size expands into flags, something is very wrong");
+
+    a->size = size;
+    a->extra = (((uint8_t)alloc_size - size)) | PHEAP_AFLAG_IN_USE;
+}
 
 pheap_inline static uint32_t size_to_index(int32_t nv, int32_t *bucket_upper_bound)
 {
@@ -497,14 +510,14 @@ pheap_inline static void make_free(void *a)
 
     if(f->allocation.extra & PHEAP_AFLAG_IN_USE)
     {
-        f->allocation.size += f->allocation.extra & PHEAP_SIZE_MASK;
+        f->allocation.size += f->allocation.extra & PHEAP_EXTRA_SIZE_MASK;
         f->allocation.extra = 0;
     }
 }
 
 pheap_inline static int32_t get_full_alloc_size(const pheap_allocation_t *a)
 {
-    return a->size + (a->extra & PHEAP_SIZE_MASK);
+    return a->size + (a->extra & PHEAP_EXTRA_SIZE_MASK);
 }
 
 pheap_inline static void merge_free(void *keep, void *merge)
@@ -545,25 +558,28 @@ pheap_inline static void release_allocation(pheap_t h, void *a)
     }
 }
 
+pheap_inline static void take_memblock_bytes(pheap_memblock_t *mem, int32_t size)
+{
+    mem->bytes_left -= size;
+    mem->unused += size;
+    *((void **)mem->unused) = PHEAP_LIST_END;
+}
+
+pheap_inline static int memblock_can_alloc(const pheap_memblock_t *mem, int32_t alloc_size)
+{
+    return mem->bytes_left >= ((ssize_t)alloc_size + (ssize_t)sizeof(PHEAP_LIST_END));
+}
+
 pheap_inline static pheap_allocation_t *unchecked_allocate(pheap_memblock_t *mem, int32_t size, int32_t alloc_size)
 {
-    pheap_allocation_t *a;
+    pheap_allocation_t *a = (pheap_allocation_t *)mem->unused;
 
-    mem->bytes_left -= alloc_size;
-    a = (pheap_allocation_t *)mem->unused;
-    mem->unused += alloc_size;
-
-    pheap_assert(0 == ((alloc_size - size) & ~PHEAP_SIZE_MASK),
-        "Size expands into flags, something is very wrong");
-
+    take_memblock_bytes(mem, alloc_size);
     a->prev = mem->prev_alloc;
-    a->size = size;
-    a->extra = (uint8_t)((alloc_size - size) | PHEAP_AFLAG_IN_USE);
-
+    set_allocated_size(a, size, alloc_size);
     a->mem_bucket = (hash_pointer(mem) % PHEAP_MEMBLOCK_BUCKETS);
 
     mem->prev_alloc = a;
-    *((void **)mem->unused) = PHEAP_LIST_END;
 
     return a;
 }
@@ -573,22 +589,10 @@ pheap_inline static pheap_allocation_t *allocate_from_existing(pheap_t h, int32_
     pheap_allocation_t *a = PHEAP_NULL;
     pheap_memblock_t *mem;
 
-    ssize_t size_with_end = ((ssize_t)alloc_size + (ssize_t)sizeof(PHEAP_LIST_END));
-
     for(mem = h->mem_list; mem; mem = mem->next_slist)
     {
-        if(mem->bytes_left >= size_with_end)
+        if(memblock_can_alloc(mem, alloc_size))
         {
-            int32_t spare_after = (int32_t)(mem->bytes_left - size_with_end);
-            //
-            // If there are not enough bytes left in the block to create more allocations,
-            // just add the spare bytes to this allocation.
-            //
-            if(spare_after < PHEAP_ALLOC_OBJ_SIZE)
-            {
-                alloc_size += spare_after;
-            }
-
             a = unchecked_allocate(mem, size, alloc_size);
             break;
         }
@@ -719,59 +723,100 @@ static void merge_with_right(pheap_t h, void *left, void *right)
     next->prev = left;
 }
 
-static pheap_allocation_t *claim_free_bin(pheap_t h, pheap_free_list_t *list, pheap_allocation_free_t *f, int32_t size)
+pheap_inline static void shrink_and_split(pheap_t h, void *obj, int32_t want_size, int32_t full_size)
 {
-    int32_t req_size = required_alloc_size(size);
-    int32_t trailing_bytes = (f->allocation.size - req_size);
+    pheap_allocation_t *a = obj;
+    pheap_allocation_t *next;
 
-    unlink_free_list(list, f);
+    int32_t req_size = required_alloc_size(want_size);
+    int32_t split_size = (full_size - req_size);
 
-    if(trailing_bytes >= PHEAP_ALLOC_OBJ_SIZE)
+#if PHEAP_INTERNAL_DEBUG == 1
+    int already_alloced = a->extra & PHEAP_AFLAG_IN_USE;
+#endif
+
+    pheap_assert(split_size >= 0, "Cant increase the size of an allocation like that.");
+
+    if(split_size >= PHEAP_ALLOC_OBJ_SIZE)
     {
         pheap_allocation_free_t *split;
-        pheap_allocation_t *next;
-        //
-        // We are allocating from a larger free bucket.
-        // Need to split the allocation and add the later part back to the free list.
-        //
-        next = pheap_next_allocation(&f->allocation);
 
-        pheap_assert(0 == ((req_size - size) & ~PHEAP_SIZE_MASK),
-            "Size expands into flags, something is very wrong");
-    
-        f->allocation.size = size;
-        f->allocation.extra = (uint8_t)((req_size - size) | PHEAP_AFLAG_IN_USE);
+        next = pheap_next_allocation(a);
 
-        split = pheap_next_allocation(&f->allocation);
-
-        split->allocation.prev = &f->allocation;
-        split->allocation.size = trailing_bytes;
+        set_allocated_size(a, want_size, req_size);
+        split = pheap_next_allocation(a);
+        split->allocation.prev = a;
+        split->allocation.size = split_size;
         split->allocation.extra = 0;
-        split->allocation.mem_bucket = f->allocation.mem_bucket;
+        split->allocation.mem_bucket = a->mem_bucket;
+        //
+        // [realloc_ptr] [this split] [END] => [realloc_ptr] [END]
+        //
+        if(PHEAP_LIST_END == next->prev)
+        {
+            pheap_assert(already_alloced, "A free block must not reside next to end. (splitting).");
+            release_to_memblock_end(h, a, split);
+
+            return;
+        }
+        //
+        // If the block following the original block is free, merge the split one and the one after.
+        //
+        if(!(next->extra & PHEAP_AFLAG_IN_USE))
+        {
+            //
+            // [realloc_ptr] [this split] [FREE] [???] => [realloc_ptr] [???]
+            //
+            pheap_assert(already_alloced, "A free block must not reside next to end. (merge).");
+            unlink_free_list(h->free_list + size_to_index(next->size, PHEAP_NULL), 
+                (pheap_allocation_free_t *)next);
+            split->allocation.size += next->size;
+        }
 
         next = pheap_next_allocation(&split->allocation);
 
         if(PHEAP_LIST_END == next->prev)
         {
-            release_to_memblock_end(h, &f->allocation, split);
-        }
-        else
-        {
-            pheap_assert((next->extra & PHEAP_AFLAG_IN_USE), "What???");
+            //
+            // [realloc_ptr] [this split] [FREE] [END] => [realloc_ptr] [END]
+            //
+            pheap_assert(already_alloced, "A free block must not reside next to end. (splitting).");
+            release_to_memblock_end(h, a, split);
 
-            next->prev = &split->allocation;
-            release_allocation(h, split);
+            return;
         }
+        //
+        // [realloc_ptr] [this split] [FREE] [alloced] => [realloc_ptr] [alloced]
+        //
+        pheap_assert(next->extra & PHEAP_AFLAG_IN_USE, "Object not in use nor end.");
+
+        next->prev = &split->allocation;
+        release_allocation(h, split);
     }
     else
     {
-        pheap_assert(0 == ((f->allocation.size - size) & ~PHEAP_SIZE_MASK),
-            "Size expands into flags, something is very wrong");
-
-        f->allocation.extra = (uint8_t)((f->allocation.size - size) | PHEAP_AFLAG_IN_USE);
-        f->allocation.size = size;
+        set_allocated_size(a, want_size, req_size);
+        pheap_assert(((uint32_t)(a->extra & PHEAP_EXTRA_SIZE_MASK)) + ((uint32_t)(full_size - req_size)) 
+                        <= PHEAP_MAX_EXTRA_SIZE, "Impossible diff? Extra has grown too large");
+        a->extra += (uint8_t)(full_size - req_size);      
+        next = pheap_next_allocation(a);
+        if(PHEAP_LIST_END != next->prev)
+        {
+            next->prev = a;
+        }
+        else
+        {
+            pheap_assert(already_alloced, "Free next to tail?");
+            pheap_assert(a == find_memblock(h, a)->prev_alloc, "Impossible prev_alloc state.");
+        }
     }
-    return (pheap_allocation_t *)f;
+}
+
+static pheap_allocation_t *claim_free_bin(pheap_t h, pheap_free_list_t *list, pheap_allocation_free_t *f, int32_t size)
+{
+    unlink_free_list(list, f);
+    shrink_and_split(h, &f->allocation, size, f->allocation.size);
+    return &f->allocation;
 }
 
 static pheap_allocation_t *allocate_from_free_bin(pheap_t h, int32_t size)
@@ -910,8 +955,7 @@ void *pheap_alloc(pheap_t h, size_t n)
 
     if(!(h->flags & PHEAP_FLAG_FIXED))
     {
-        if((n & PHEAP_HUGE_SIZE_MASK)
-        || ((n + sizeof(pheap_allocation_free_t)) & PHEAP_HUGE_SIZE_MASK))
+        if((n & PHEAP_HUGE_SIZE_MASK) || ((n + PHEAP_ALLOC_OBJ_SIZE) & PHEAP_HUGE_SIZE_MASK))
         {
             uint8_t *ptr;
             pheap_huge_allocation_t *huge;
@@ -978,9 +1022,30 @@ void *pheap_zalloc(pheap_t h, size_t n)
     return ptr;
 }
 
-void *pheap_realloc(pheap_t h, void *p, size_t n)
+static void *simple_realloc(pheap_t h, void *old, size_t n)
 {
     void *ptr;
+    size_t old_size = pheap_msize(old);
+    //
+    // TODO XXX Wouldnt it be safe to call free() here and then potentially reuse the memory
+    //          it currently resides in partially? Or can the data get overwritten? Naaah?
+    //          Will consider when I am less tired :)
+    //
+    if(PHEAP_NULL == (ptr = pheap_alloc(h, n)))
+    {
+        return PHEAP_NULL;
+    }
+
+    pheap_memcpy(ptr, old, (n < old_size) ? n : old_size);
+    pheap_free(h, old);
+
+    return ptr;
+}
+
+void *pheap_realloc(pheap_t h, void *p, size_t n)
+{
+    pheap_allocation_t *curr;
+    int32_t old_full;
     size_t old_size;
 
     if(PHEAP_NULL == p)
@@ -990,13 +1055,102 @@ void *pheap_realloc(pheap_t h, void *p, size_t n)
 
     old_size = pheap_msize(p);
 
-    if(PHEAP_NULL == (ptr = pheap_alloc(h, n)))
+    if(!(h->flags & PHEAP_FLAG_FIXED))
     {
+        if((n & PHEAP_HUGE_SIZE_MASK) || ((n + PHEAP_ALLOC_OBJ_SIZE) & PHEAP_HUGE_SIZE_MASK))
+        {
+            return simple_realloc(h, p, n);
+        }
+    }
+    else if(n >= 0xFFFFFF00)
+    {
+        //
+        // Due to the internal allocation structures only huge-allocs can be >32-bits.
+        // This puts a 32-bit limitation on PHEAP_FLAG_FIXED that cant allocate huge pages.
+        //
         return PHEAP_NULL;
     }
 
-    pheap_memcpy(ptr, p, (n < old_size) ? n : old_size);
-    return ptr;
+    curr = pheap_mem_to_obj(p);
+
+    if(curr->extra & PHEAP_AFLAG_IS_HUGE)
+    {
+        return simple_realloc(h, p, n);
+    }
+
+    old_full = get_full_alloc_size(curr);
+
+    if(n < old_size)
+    {
+        //
+        // Allocation is smaller
+        //
+        pheap_lock(h);
+        shrink_and_split(h, curr, (int32_t)n, old_full);
+        pheap_unlock(h);
+
+        return p;
+    }
+    else if(n > old_size)
+    {
+        int32_t avail;
+        int32_t req_size = required_alloc_size((int32_t)n);      
+        pheap_allocation_t *next;
+
+        pheap_lock(h);
+        
+        next = pheap_next_allocation(curr);
+
+        if(next->prev == PHEAP_LIST_END)
+        {
+            //
+            // Allocation is at the end of its memory block,
+            // see if there are bytes left to increase the allocation...
+            //
+            int32_t diff = (int32_t)(n - old_size);
+            pheap_memblock_t *mb = find_memblock(h, curr);
+            if(memblock_can_alloc(mb, diff))
+            {
+                take_memblock_bytes(mb, diff);
+                curr->size += diff;
+            }
+            else
+            {
+                pheap_unlock(h);
+                return simple_realloc(h, p, n);
+            }
+
+            pheap_unlock(h);
+            return p;
+        }
+ 
+        if(next->extra & PHEAP_AFLAG_IN_USE)
+        {
+            pheap_unlock(h);
+            return simple_realloc(h, p, n);
+        }
+
+        avail = old_full + get_full_alloc_size(next);
+
+        if(avail < req_size)
+        {
+            pheap_unlock(h);
+            return simple_realloc(h, p, n);
+        }
+        //
+        // If we combine this allocation with the block after it, we have enough bytes
+        // to satisfy the requested size.
+        //
+        merge_with_right(h, curr, next);
+        shrink_and_split(h, curr, (int32_t)n, avail);
+        pheap_unlock(h);
+
+        return p;
+    }
+    //
+    // Old and new size are the same, just return p
+    //
+    return p;
 }
 
 void pheap_free(pheap_t h, void *p)
@@ -1035,6 +1189,14 @@ void pheap_free(pheap_t h, void *p)
     prev = a->prev;
     if(prev)
     {
+        //
+        // Are we at end?
+        //
+        if(PHEAP_LIST_END == prev)
+        {
+            release_to_memblock_end(h, prev, a);
+            goto cleanup;
+        }
         //
         // Either:
         // [FREE] [THIS] [????]
@@ -1261,6 +1423,7 @@ int pheap_test_is_pristine(pheap_t h)
     {
         return 0;
     }
+
     for(mb = h->mem_list; mb; mb = mb->next_slist)
     {
         if(mb->bytes_left != mb->total_size)
@@ -1268,6 +1431,7 @@ int pheap_test_is_pristine(pheap_t h)
             return 0;
         }
     }
+
     for(int i = 0; i < PHEAP_SIZE_BITS; ++i)
     {
         pheap_free_list_t *list = (h->free_list + i);
