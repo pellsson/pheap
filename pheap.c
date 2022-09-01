@@ -694,10 +694,10 @@ static void release_to_memblock_end(pheap_t h, pheap_allocation_t *prev, void *a
 {
     pheap_memblock_t *mem;
     int32_t asize = get_full_alloc_size(a);
+#if PHEAP_INTERNAL_DEBUG == 1
     pheap_allocation_t *next = (pheap_allocation_t *)(((uint8_t *)a) + asize);
-
     pheap_assert(PHEAP_LIST_END == next->prev, "Impossible release?");
-
+#endif
     mem = find_memblock(h, a);
     mem->bytes_left += asize;
     mem->unused -= asize;

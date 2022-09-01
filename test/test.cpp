@@ -20,7 +20,6 @@
 	{ \
 		std::cout << "FAILS (Line: " << __LINE__ << "): " << #lhs " " #op " " #rhs << std::endl; \
 		std::cout << "LHS " << (lv) << ", RHS " << (rv) << std::endl; \
-		__debugbreak(); \
 		exit(1); \
 	} \
 }
@@ -202,7 +201,7 @@ static void test_realloc(pheap_t h)
 		int32_t curr_size = size_range / 2;
 
 		allocs.push_back(std::make_pair(pheap_alloc(h, 0x1000), 0x1000));
-		test_true(NULL != (a = pheap_realloc(h, NULL, curr_size), curr_size));
+		test_true(NULL != (a = pheap_realloc(h, NULL, curr_size)));
 		allocs.push_back(std::make_pair(pheap_alloc(h, 0x1000), 0x1000));
 
 		//printf("First:  %p\n", allocs.front().first);
