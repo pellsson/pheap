@@ -6,7 +6,7 @@ AR=${AR:-ar}
 OBJDIR=obj
 CFLAGS="-Wall -Wextra -fPIE -Wno-attributes -Wno-unused-function"
 
-TEST_DEFS="-DPHEAP_TEST -DPHEAP_USE_GLOBAL_HEAP=1"
+TEST_DEFS="-DPHEAP_TEST -DPHEAP_USE_GLOBAL_HEAP=1 -DPHEAP_INTERNAL_DEBUG=1"
 
 function do_verbose() {
 	echo "$1"
