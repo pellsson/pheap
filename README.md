@@ -10,7 +10,5 @@ Read through the defines in the configuration block at the top of `pheap.h` and 
 With overwhelming probability, the easist way is to just add `pheap.h` and `pheap.c` to your current build system and be done with it. If you absolutely need a library, you can build a static one with `build.sh` or `build.bat` depending on system.
 
 # Current limitations
-* Currently never releases memory back to the system.
-* Does not utilize reserved memory where available.
-* `realloc()` is just `memcpy(malloc(), old)`, which sometimes does unnecessary work.
+See issues.
 
