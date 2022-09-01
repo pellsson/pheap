@@ -221,7 +221,7 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
 
 #define PHEAP_MAX_FREEBIN_SCANS 8
 
-#define PHEAP_LIST_END ((void *)((uintptr_t)0xFFFFFFFFFFFFFFFFULL))
+#define PHEAP_LIST_END ((void *)(~((uintptr_t)0)))
 
 typedef uint8_t pheap_hash_t;
 
@@ -403,7 +403,7 @@ pheap_inline static void set_allocated_size(pheap_allocation_t *a, int32_t size,
         "Size expands into flags, something is very wrong");
 
     a->size = size;
-    a->extra = (((uint8_t)alloc_size - size)) | PHEAP_AFLAG_IN_USE;
+    a->extra = (uint8_t)((alloc_size - size) | PHEAP_AFLAG_IN_USE);
 }
 
 pheap_inline static uint32_t size_to_index(int32_t nv, int32_t *bucket_upper_bound)
