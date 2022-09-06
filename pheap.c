@@ -339,18 +339,9 @@ pheap_static_assert(sizeof(pheap_huge_allocation_t) <= PHEAP_PAGE_SIZE, page_siz
 typedef struct pheap_allocation_free
 {
     pheap_allocation_t allocation;
-
-    struct pheap_allocation_free *prev;
-    struct pheap_allocation_free *next;
+    dlist_t free_list;
 }
 pheap_allocation_free_t;
-
-typedef struct pheap_free_list
-{
-    struct pheap_allocation_free *tail;
-    struct pheap_allocation_free *head;
-}
-pheap_free_list_t;
 
 #pragma pack(pop)
 
@@ -374,7 +365,7 @@ struct pheap
     dlist_t huge_list;
     dlist_t mem_list;
     dlist_t mem_buckets[PHEAP_MEMBLOCK_BUCKETS];
-    pheap_free_list_t free_list[PHEAP_SIZE_BITS];
+    dlist_t free_list[PHEAP_SIZE_BITS];
 };
 
 pheap_static_assert((PHEAP_ALLOC_OBJ_SIZE * 2) <= (PHEAP_EXTRA_SIZE_MASK + 1), object_too_big);
@@ -477,82 +468,10 @@ pheap_inline static uint32_t size_to_index(int32_t nv, int32_t *bucket_upper_bou
     return bitscan_forward32(n);
 }
 
-pheap_inline static void unlink_free_list(pheap_free_list_t *list, pheap_allocation_free_t *f)
-{
-    if(PHEAP_NULL == list->head)
-    {
-        pheap_impossible("Attempting to unlink an empty list - Something got out of sync...\n");
-    }
-
-    if(!f->prev)
-    {
-        list->head = f->next;
-    }
-    else
-    {
-        f->prev->next = f->next;
-    }
-
-    if(!f->next)
-    {
-        list->tail = f->prev;
-    }
-    else
-    {
-        f->next->prev = f->prev;
-    }
-}
-
-pheap_inline static void unlink_free(pheap_t h, void *ptr)
+pheap_inline static void unlink_free(void *ptr)
 {
     pheap_allocation_free_t *f = (pheap_allocation_free_t *)ptr;
-    unlink_free_list(h->free_list + size_to_index(f->allocation.size, PHEAP_NULL), f);
-}
-
-pheap_inline static void free_insert_after(pheap_free_list_t *dlist, pheap_allocation_free_t *after, pheap_allocation_free_t *ins)
-{
-    if(!after)
-    {
-        ins->next = ins->prev = PHEAP_NULL;
-        dlist->tail = dlist->head = ins;
-        return;
-    }
-
-    ins->next   = after->next;
-    ins->prev   = after;
-    after->next = ins;
-    
-    if(ins->next)
-    {
-        ins->next->prev = ins;
-    }
-    else
-    {
-        dlist->tail = ins;
-    }
-}
-
-pheap_inline static void free_insert_before(pheap_free_list_t *dlist, pheap_allocation_free_t *before, pheap_allocation_free_t *ins)
-{
-    if(!before)
-    {
-        ins->next = ins->prev = PHEAP_NULL;
-        dlist->tail = dlist->head = ins;
-        return;
-    }
-
-    ins->prev    = before->prev;
-    ins->next    = before;
-    before->prev = ins;
-
-    if(ins->prev)
-    {
-        ins->prev->next = ins;
-    }
-    else
-    {
-        dlist->head = ins;
-    }
+    dlist_remove(&f->free_list);
 }
 
 pheap_inline static void make_free(void *a)
@@ -589,11 +508,10 @@ pheap_inline static void release_allocation(pheap_t h, void *a)
 {
     int32_t bucket_upper_bound;
     pheap_allocation_free_t *f = a;
-    pheap_free_list_t *list;
+    dlist_t *list;
 
     make_free(a);
-    
-    f->next = f->prev = PHEAP_NULL;
+
     list = (h->free_list + size_to_index(f->allocation.size, &bucket_upper_bound));
 
     if(pheap_search_dir_forward(f->allocation.size, bucket_upper_bound))
@@ -601,14 +519,14 @@ pheap_inline static void release_allocation(pheap_t h, void *a)
         //
         // Push to head
         //
-        free_insert_before(list, list->head, f);
+        dlist_insert_head(list, &f->free_list);
     }
     else
     {
         //
         // Push to tail
         //
-        free_insert_after(list, list->tail, f);
+        dlist_insert_tail(list, &f->free_list);
     }
 }
 
@@ -793,13 +711,13 @@ static void release_to_memblock_end(pheap_t h, pheap_allocation_t *prev, void *a
     *((void **)mem->unused) = PHEAP_LIST_END;
 }
 
-static void merge_with_right(pheap_t h, void *left, void *right)
+static void merge_with_right(void *left, void *right)
 {
     pheap_allocation_t *next;
 
     pheap_assert(!(((pheap_allocation_t *)right)->extra & PHEAP_AFLAG_IN_USE), "Cant merge right with used block");
 
-    unlink_free(h, right);
+    unlink_free(right);
     merge_free(left, right);
 
     next = pheap_next_allocation(left);
@@ -855,8 +773,7 @@ pheap_inline static void shrink_and_split(pheap_t h, void *obj, int32_t want_siz
             // [realloc_ptr] [this split] [FREE] [???] => [realloc_ptr] [???]
             //
             pheap_assert(already_alloced, "A free block must not reside next to end. (merge).");
-            unlink_free_list(h->free_list + size_to_index(next->size, PHEAP_NULL), 
-                (pheap_allocation_free_t *)next);
+            unlink_free(next);
             split->allocation.size += next->size;
         }
 
@@ -899,17 +816,15 @@ pheap_inline static void shrink_and_split(pheap_t h, void *obj, int32_t want_siz
     }
 }
 
-static pheap_allocation_t *claim_free_bin(pheap_t h, pheap_free_list_t *list, pheap_allocation_free_t *f, int32_t size)
+static pheap_allocation_t *claim_free_bin(pheap_t h, pheap_allocation_free_t *f, int32_t size)
 {
-    unlink_free_list(list, f);
+    unlink_free(f);
     shrink_and_split(h, &f->allocation, size, f->allocation.size);
     return &f->allocation;
 }
 
 static pheap_allocation_t *allocate_from_free_bin(pheap_t h, int32_t size)
 {
-    pheap_allocation_free_t *ret = PHEAP_NULL;
-
     int32_t req_size = required_alloc_size(size);
 
     uint32_t i = 0;
@@ -917,17 +832,19 @@ static pheap_allocation_t *allocate_from_free_bin(pheap_t h, int32_t size)
     uint32_t free_buckets;
 
     uint32_t index = size_to_index(req_size, &upper);
-    pheap_free_list_t *list = (h->free_list + index);
+    dlist_t *list = (h->free_list + index);
 
     int search_fwd = pheap_search_dir_forward(req_size, upper);
 
-    ret = search_fwd ? list->head : list->tail;
+    dlist_t *it = (search_fwd ? list->next : list->prev);
 
-    while(ret)
+    while(it != list)
     {
-        if(ret->allocation.size >= req_size)
+        pheap_allocation_free_t *f = dlist_to_type(it, pheap_allocation_free_t, free_list);
+
+        if(f->allocation.size >= req_size)
         {
-            return claim_free_bin(h, list, ret, size);
+            return claim_free_bin(h, f, size);
         }
 
         if(++i >= PHEAP_MAX_FREEBIN_SCANS)
@@ -941,11 +858,11 @@ static pheap_allocation_t *allocate_from_free_bin(pheap_t h, int32_t size)
         
         if(search_fwd)
         {
-            ret = ret->next;
+            it = it->next;
         }
         else
         {
-            ret = ret->prev;
+            it = it->prev;
         }
     }
 
@@ -961,9 +878,10 @@ static pheap_allocation_t *allocate_from_free_bin(pheap_t h, int32_t size)
     for(i = (index + 1); i < free_buckets; ++i)
     {
         list = (h->free_list + i);
-        if(list->tail)
+        if(list != list->prev)
         {
-            return claim_free_bin(h, list, list->tail, size);
+            pheap_allocation_free_t *f = dlist_to_type(list->prev, pheap_allocation_free_t, free_list);
+            return claim_free_bin(h, f, size);
         }
     }
 
@@ -1176,7 +1094,7 @@ void *pheap_realloc(pheap_t h, void *p, size_t n)
         // If we combine this allocation with the block after it, we have enough bytes
         // to satisfy the requested size.
         //
-        merge_with_right(h, curr, next);
+        merge_with_right(curr, next);
         shrink_and_split(h, curr, (int32_t)n, avail);
         pheap_unlock(h);
 
@@ -1244,7 +1162,7 @@ void pheap_free(pheap_t h, void *p)
             // [FREE] [THIS] ---> [THIS    ]
             // The block before this block is also free. Merge the two.
             //
-            unlink_free(h, prev);
+            unlink_free(prev);
             merge_free(prev, a);
 
             a = prev;
@@ -1268,7 +1186,7 @@ void pheap_free(pheap_t h, void *p)
     }
     else if(0 == (PHEAP_AFLAG_IN_USE & next->extra))
     {
-        merge_with_right(h, a, next);
+        merge_with_right(a, next);
     }
     else
     {
@@ -1301,9 +1219,15 @@ static pheap_inline pheap_t init_pheap(void *ptr, size_t n, uint32_t flags)
 
     dlist_init(&h->huge_list);
     dlist_init(&h->mem_list);
+
     for(int i = 0; i < PHEAP_MEMBLOCK_BUCKETS; ++i)
     {
-        dlist_init(&h->mem_buckets[i]);
+        dlist_init(h->mem_buckets + i);
+    }
+
+    for(int i = 0; i < PHEAP_SIZE_BITS; ++i)
+    {
+        dlist_init(h->free_list + i);
     }
 
     h->flags = flags;
@@ -1479,8 +1403,7 @@ int pheap_test_is_pristine(pheap_t h)
 
     for(int i = 0; i < PHEAP_SIZE_BITS; ++i)
     {
-        pheap_free_list_t *list = (h->free_list + i);
-        if((list->tail != PHEAP_NULL) || (list->head != PHEAP_NULL))
+        if(!dlist_is_empty(h->free_list + i))
         {
             return 0;
         }
