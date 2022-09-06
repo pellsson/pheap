@@ -248,6 +248,68 @@ typedef uint8_t pheap_hash_t;
 #define pheap_huge_to_allocbase(huge) \
     ((void *)(((uintptr_t)huge) & PHEAP_PAGE_MASK))
 
+typedef struct dlist
+{
+    struct dlist *next;
+    struct dlist *prev;
+}
+dlist_t;
+
+pheap_inline static void dlist_init(dlist_t *head)
+{
+    head->next = head->prev = head;
+}
+
+pheap_inline static int dlist_is_empty(const dlist_t *head)
+{
+    return head == head->next;
+}
+
+pheap_inline static void dlist_remove(dlist_t *entry)
+{
+    dlist_t *prev = entry->prev;
+    dlist_t *next = entry->next;
+    prev->next = next;
+    next->prev = prev;
+}
+
+pheap_inline static void *dlist_remove_tail(dlist_t *head)
+{
+    dlist_t *ret = head->prev;
+    dlist_remove(head);
+    return ret;
+}
+
+pheap_inline static void *dlist_remove_head(dlist_t *head)
+{
+    dlist_t *ret = head->next;
+    dlist_remove(head);
+    return ret;
+}
+
+pheap_inline static void dlist_insert_head(dlist_t *head, dlist_t *entry)
+{
+    dlist_t *h = head;
+    dlist_t *next = h->next;
+    entry->next = next;
+    entry->prev = h;
+    h->next = entry;
+    next->prev = entry;
+}
+
+pheap_inline static void dlist_insert_tail(dlist_t *head, dlist_t *entry)
+{
+    dlist_t *h = head;
+    dlist_t *prev = h->prev;
+    entry->next = h;
+    entry->prev = prev;
+    prev->next = entry;
+    h->prev = entry;
+}
+
+#define dlist_to_type(obj, type, field) \
+    ((type *)(((uint8_t *)obj) - ((uintptr_t)(&((type *)0)->field))))
+
 #pragma pack(push, 1)
 
 typedef struct pheap_allocation
@@ -266,19 +328,11 @@ pheap_allocation_t;
 
 typedef struct pheap_huge_allocation
 {
-    struct pheap_huge_allocation *next;
-    struct pheap_huge_allocation *prev;
+    dlist_t list;
     size_t huge_size;
     pheap_allocation_t allocation;
 }
 pheap_huge_allocation_t;
-
-typedef struct pheap_huge_list
-{
-    pheap_huge_allocation_t *head;
-    pheap_huge_allocation_t *tail;
-}
-pheap_huge_list_t;
 
 pheap_static_assert(sizeof(pheap_huge_allocation_t) <= PHEAP_PAGE_SIZE, page_size_too_small);
 
@@ -302,8 +356,8 @@ pheap_free_list_t;
 
 typedef struct pheap_memblock
 {
-    struct pheap_memblock *next_slist;
-    struct pheap_memblock *next_hash;
+    dlist_t list; // must be first
+    dlist_t hash_list;
     struct pheap_allocation *prev_alloc;
     ssize_t total_size;
     ssize_t bytes_left;
@@ -317,9 +371,9 @@ struct pheap
 #ifdef PHEAP_USE_LOCKS
     pheap_lock_t lock;
 #endif
-    pheap_huge_list_t huge_list;
-    pheap_memblock_t *mem_list;
-    pheap_memblock_t *mem_buckets[PHEAP_MEMBLOCK_BUCKETS];
+    dlist_t huge_list;
+    dlist_t mem_list;
+    dlist_t mem_buckets[PHEAP_MEMBLOCK_BUCKETS];
     pheap_free_list_t free_list[PHEAP_SIZE_BITS];
 };
 
@@ -587,10 +641,12 @@ pheap_inline static pheap_allocation_t *unchecked_allocate(pheap_memblock_t *mem
 pheap_inline static pheap_allocation_t *allocate_from_existing(pheap_t h, int32_t size, int32_t alloc_size)
 {
     pheap_allocation_t *a = PHEAP_NULL;
-    pheap_memblock_t *mem;
+    dlist_t *next;
 
-    for(mem = h->mem_list; mem; mem = mem->next_slist)
+    for(next = h->mem_list.next; next != &h->mem_list; next = next->next)
     {
+        pheap_memblock_t *mem = (pheap_memblock_t *)next;
+
         if(memblock_can_alloc(mem, alloc_size))
         {
             a = unchecked_allocate(mem, size, alloc_size);
@@ -603,17 +659,18 @@ pheap_inline static pheap_allocation_t *allocate_from_existing(pheap_t h, int32_
 
 pheap_inline static pheap_memblock_t *find_memblock(pheap_t h, const pheap_allocation_t *a)
 {
-    pheap_memblock_t *mem = h->mem_buckets[a->mem_bucket];
+    dlist_t *head = h->mem_buckets + a->mem_bucket;
     const uint8_t *ptr = (const uint8_t *)a; 
 
-    for(; mem; mem = mem->next_hash)
+    for(dlist_t *it = head->next; it != head; it = it->next)
     {
+        const pheap_memblock_t *mem = dlist_to_type(it, pheap_memblock_t, hash_list);
         const uint8_t *start = ((const uint8_t *)mem) + pheap_roundup2(sizeof(*mem), PHEAP_ALIGNMENT);
         const uint8_t *end = start + mem->total_size;
 
         if(ptr >= start && ptr < end)
         {
-            return mem;
+            return (pheap_memblock_t *)mem;
         }
     }
 
@@ -625,10 +682,8 @@ pheap_inline static void memblock_init(pheap_t h, pheap_memblock_t *mem, size_t 
 {
     uint32_t hash_bucket = (hash_pointer(mem) % PHEAP_MEMBLOCK_BUCKETS);
 
-    mem->next_slist = h->mem_list;
-    h->mem_list = mem;
-    mem->next_hash = h->mem_buckets[hash_bucket];
-    h->mem_buckets[hash_bucket] = mem;
+    dlist_insert_head(&h->mem_list, &mem->list);
+    dlist_insert_head(&h->mem_buckets[hash_bucket], &mem->hash_list);
 
     mem->prev_alloc = 0;
     mem->total_size = alloced - pheap_roundup2(sizeof(*mem), PHEAP_ALIGNMENT);
@@ -681,7 +736,11 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
         alloc_size = pheap_roundup2(alloc_size, PHEAP_MEMBLOCK_SIZE_HINT);
     }
 
-    if(PHEAP_NULL != (mem = pheap_native_alloc(alloc_size, pheap_is_exec(h->flags))))
+    pheap_unlock(h);
+    mem = pheap_native_alloc(alloc_size, pheap_is_exec(h->flags));
+    pheap_lock(h);
+
+    if(PHEAP_NULL != mem)
     {
         memblock_init(h, mem, alloc_size);
         a = unchecked_allocate(mem, size, req_size);
@@ -700,6 +759,34 @@ static void release_to_memblock_end(pheap_t h, pheap_allocation_t *prev, void *a
 #endif
     mem = find_memblock(h, a);
     mem->bytes_left += asize;
+
+    //if(mem->next_slist != NULL && (mem->total_size == mem->bytes_left))
+    //{
+    //    pheap_memblock_t *prev = NULL;
+    //    pheap_memblock_t *curr;
+    //    //
+    //    // Release the block.
+    //    // Not thrilled about this, should probably make it a double-list...
+    //    //
+    //    for(curr = h->mem_list; curr; curr = curr->next_slist)
+    //    {
+    //        if(curr == mem)
+    //        {
+    //            
+
+    //            prev->next_slist = curr->next_slist;
+    //            pheap_unlock(h);
+
+    //            pheap_native_destroy(mem, mem->total_size + pheap_roundup2(sizeof(*mem), PHEAP_ALIGNMENT));
+
+    //            pheap_lock(h);
+    //            return;
+    //        }
+
+    //        prev = curr;
+    //    }
+    //}
+
     mem->unused -= asize;
     mem->prev_alloc = prev;
 
@@ -883,69 +970,17 @@ static pheap_allocation_t *allocate_from_free_bin(pheap_t h, int32_t size)
     return PHEAP_NULL;
 }
 
-pheap_inline static void unsafe_link_huge_alloc(pheap_t h, pheap_huge_allocation_t *a)
-{
-    pheap_huge_allocation_t *after;
-
-    a->next = PHEAP_NULL;
-    a->prev = PHEAP_NULL;
-
-    after = h->huge_list.tail;
-
-    if(PHEAP_NULL == after)
-    {
-        a->next = a->prev = PHEAP_NULL;
-        h->huge_list.head = h->huge_list.tail = a;
-    }
-    else
-    {
-        a->next = after->next;
-        a->prev = after;
-        after->next = a;
-    
-        if(a->next)
-        {
-            a->next->prev = a;
-        }
-        else
-        {
-            h->huge_list.tail = a;
-        }
-    }
-}
-
-pheap_inline static void unsafe_unlink_huge_alloc(pheap_t h, pheap_huge_allocation_t *a)
-{
-    if(!a->prev)
-    {
-        h->huge_list.head = a->next;
-    }
-    else
-    {
-        a->prev->next = a->next;
-    }
-
-    if(!a->next)
-    {
-        h->huge_list.tail = a->prev;
-    }
-    else
-    {
-        a->next->prev = a->prev;
-    }
-}
-
 pheap_inline static void link_huge_alloc(pheap_t h, pheap_huge_allocation_t *a)
 {
     pheap_lock(h);
-    unsafe_link_huge_alloc(h, a);
+    dlist_insert_head(&h->huge_list, &a->list);
     pheap_unlock(h);
 }
 
 pheap_inline static void unlink_huge_alloc(pheap_t h, pheap_huge_allocation_t *a)
 {
     pheap_lock(h);
-    unsafe_unlink_huge_alloc(h, a);
+    dlist_remove(&a->list);
     pheap_unlock(h);
 }
 
@@ -1264,6 +1299,13 @@ static pheap_inline pheap_t init_pheap(void *ptr, size_t n, uint32_t flags)
 
     pheap_memset(h, 0, sizeof(*h));
 
+    dlist_init(&h->huge_list);
+    dlist_init(&h->mem_list);
+    for(int i = 0; i < PHEAP_MEMBLOCK_BUCKETS; ++i)
+    {
+        dlist_init(&h->mem_buckets[i]);
+    }
+
     h->flags = flags;
     pheap_init_lock(h);
 
@@ -1311,9 +1353,6 @@ pheap_t pheap_create(uint32_t flags)
 
 void pheap_destory(pheap_t h)
 {
-    pheap_memblock_t *mb = h->mem_list;
-    pheap_huge_allocation_t *huge;
-
     pheap_uninit_lock(h);
 
     if(h->flags & PHEAP_FLAG_FIXED)
@@ -1321,31 +1360,36 @@ void pheap_destory(pheap_t h)
         return;
     }
 
-    huge = h->huge_list.head;
-    while(huge)
+    for(dlist_t *it = h->huge_list.next; it != &h->huge_list;)
     {
-        pheap_huge_allocation_t *next = huge->next;
+        dlist_t *next = it->next;
+        pheap_huge_allocation_t *huge = (pheap_huge_allocation_t *)it;
         pheap_native_destroy(pheap_huge_to_allocbase(huge), huge->huge_size + PHEAP_PAGE_SIZE);
-        huge = next;
+        it = next;
     }
 
-    while(mb)
+    for(dlist_t *it = h->mem_list.next; it != &h->mem_list;)
     {
+        pheap_memblock_t *mb = (pheap_memblock_t *)it;
         ssize_t n = mb->total_size + pheap_roundup2(sizeof(*mb), PHEAP_ALIGNMENT);
-        pheap_memblock_t *next = mb->next_slist;
+        dlist_t *next = it->next;
         //
         // The first allocated memory block (ie the last in this list), also hosts the pheap_t structure.
         //
-        if(PHEAP_NULL == next)
+        if(it == h->mem_list.prev)
         {
+            //
+            // Destroy the heap and exit.
+            //
             pheap_native_destroy(h, n + pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT));
+            break;
         }
         else
         {
             pheap_native_destroy(mb, n);
         }
 
-        mb = next;
+        it = next;
     }
 }
 
@@ -1418,14 +1462,15 @@ void pheap_g_free(void *p)
 
 int pheap_test_is_pristine(pheap_t h)
 {
-    pheap_memblock_t *mb;
-    if(PHEAP_NULL != h->huge_list.head || PHEAP_NULL != h->huge_list.tail)
+    if(!dlist_is_empty(&h->huge_list))
     {
         return 0;
     }
 
-    for(mb = h->mem_list; mb; mb = mb->next_slist)
+    for(dlist_t *it = h->mem_list.next; it != &h->mem_list; it = it->next)
     {
+        pheap_memblock_t *mb = (pheap_memblock_t *)it;
+
         if(mb->bytes_left != mb->total_size)
         {
             return 0;
