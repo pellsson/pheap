@@ -211,7 +211,7 @@ static void test_realloc(pheap_t h)
 
 		while(curr_size > 0 && curr_size < size_range)
 		{
-			int r = rand();
+			int rnd = rand();
 
 			curr_size += (int32_t)rand_between(0, 0x80) * size_dir;
 
@@ -224,7 +224,7 @@ static void test_realloc(pheap_t h)
 				curr_size = size_range;
 			}
 
-			if(r & 0x03)
+			if(rnd & 0x03)
 			{
 				void *old = a;
 				a = pheap_realloc(h, a, curr_size);
@@ -329,7 +329,7 @@ int main()
 		num_tests = atoi(getenv("NUM_TESTS"));
 	}
 
-	for(uint32_t i = 0; i < num_tests; ++i)
+	for(uint32_t test = 0; test < num_tests; ++test)
 	{
 		printf("Testing with random seed: %d\n", seed);
 		srand(seed);
