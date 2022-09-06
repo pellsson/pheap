@@ -12,8 +12,16 @@ set ARFLAGS=/NOLOGO
 
 set TEST_DEFS=/DPHEAP_TEST /DPHEAP_USE_GLOBAL_HEAP=1 /DPHEAP_INTERNAL_DEBUG=1
 
-
 set VS_MAJOR=
+
+if "%1" == "clean" (
+	echo Cleaning up...
+	erase /F /Q pheap-test.exe 2> nul
+	erase /F /Q pheap.lib 2> nul
+	erase /F /Q obj\* 2> nul
+	rmdir /S /Q obj 2> nul
+	exit /B 0
+)
 
 for /f "delims=. tokens=1" %%a in ("%VSCMD_VER%") do (
 	set VS_MAJOR=%%a
