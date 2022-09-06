@@ -678,32 +678,24 @@ static void release_to_memblock_end(pheap_t h, pheap_allocation_t *prev, void *a
     mem = find_memblock(h, a);
     mem->bytes_left += asize;
 
-    //if(mem->next_slist != NULL && (mem->total_size == mem->bytes_left))
-    //{
-    //    pheap_memblock_t *prev = NULL;
-    //    pheap_memblock_t *curr;
-    //    //
-    //    // Release the block.
-    //    // Not thrilled about this, should probably make it a double-list...
-    //    //
-    //    for(curr = h->mem_list; curr; curr = curr->next_slist)
-    //    {
-    //        if(curr == mem)
-    //        {
-    //            
+    if(&mem->list != h->mem_list.prev)
+    {
+        //
+        // This is not the root-memblock that hosts the pheap structure.
+        // See if it should be released back to the system.
+        //
+        if(mem->total_size == mem->bytes_left)
+        {
+            dlist_remove(&mem->list);
+            dlist_remove(&mem->hash_list);
+            pheap_unlock(h);
 
-    //            prev->next_slist = curr->next_slist;
-    //            pheap_unlock(h);
+            pheap_native_destroy(mem, mem->total_size + pheap_roundup2(sizeof(*mem), PHEAP_ALIGNMENT));
 
-    //            pheap_native_destroy(mem, mem->total_size + pheap_roundup2(sizeof(*mem), PHEAP_ALIGNMENT));
-
-    //            pheap_lock(h);
-    //            return;
-    //        }
-
-    //        prev = curr;
-    //    }
-    //}
+            pheap_lock(h);
+            return;
+        }
+    }
 
     mem->unused -= asize;
     mem->prev_alloc = prev;
