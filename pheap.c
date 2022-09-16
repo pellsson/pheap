@@ -370,6 +370,8 @@ struct pheap
 
 pheap_static_assert((PHEAP_ALLOC_OBJ_SIZE * 2) <= (PHEAP_EXTRA_SIZE_MASK + 1), object_too_big);
 
+#ifdef PHEAP_USE_LOCKS
+
 pheap_inline static void pheap_lock_internal_lock(pheap_internal_lock_t *lock)
 {
     while(pheap_atomic_testandset(lock, 1))
@@ -418,6 +420,15 @@ pheap_inline static void pheap_unlock(pheap_t h)
         pheap_unlock_native_lock(&h->lock);
     }
 }
+
+#else
+    #define pheap_lock_internal_lock(...)
+    #define pheap_unlock_internal_lock(...)
+    #define pheap_init_lock(...)
+    #define pheap_uninit_lock(...)
+    #define pheap_lock(...)
+    #define pheap_unlock(...)
+#endif // PHEAP_USE_LOCKS
 
 static pheap_inline pheap_hash_t hash_pointer(const void *p)
 {
@@ -1319,10 +1330,10 @@ pheap_inline static int pheap_global_init(void)
     if(PHEAP_NULL == g_pheap)
     {
         uint32_t flags = 0;
-#if PHEAP_LOCK_PRIMITIVE != PHEAP_NO_LOCK
+#if PHEAP_USE_LOCKS
         flags = PHEAP_FLAG_THREADSAFE;
-        pheap_lock_internal_lock(&g_init_lock);
 #endif
+        pheap_lock_internal_lock(&g_init_lock);
         if(PHEAP_NULL == g_pheap)
         {
             g_pheap = pheap_create(flags);
@@ -1332,9 +1343,7 @@ pheap_inline static int pheap_global_init(void)
                 return 0;
             }
         }
-#if PHEAP_LOCK_PRIMITIVE != PHEAP_NO_LOCK
         pheap_unlock_internal_lock(&g_init_lock);
-#endif
     }
     return 1;
 }
