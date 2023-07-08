@@ -422,12 +422,12 @@ pheap_inline static void pheap_unlock(pheap_t h)
 }
 
 #else
-    #define pheap_lock_internal_lock(...)
-    #define pheap_unlock_internal_lock(...)
-    #define pheap_init_lock(...)
-    #define pheap_uninit_lock(...)
-    #define pheap_lock(...)
-    #define pheap_unlock(...)
+    #define pheap_lock_internal_lock(h)     (void)h
+    #define pheap_unlock_internal_lock(h)   (void)h
+    #define pheap_init_lock(h)              (void)h
+    #define pheap_uninit_lock(h)            (void)h
+    #define pheap_lock(h)                   (void)h
+    #define pheap_unlock(h)                 (void)h
 #endif // PHEAP_USE_LOCKS
 
 static pheap_inline pheap_hash_t hash_pointer(const void *p)
@@ -1330,7 +1330,7 @@ pheap_inline static int pheap_global_init(void)
     if(PHEAP_NULL == g_pheap)
     {
         uint32_t flags = 0;
-#if PHEAP_USE_LOCKS
+#ifdef PHEAP_USE_LOCKS
         flags = PHEAP_FLAG_THREADSAFE;
 #endif
         pheap_lock_internal_lock(&g_init_lock);
