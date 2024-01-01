@@ -361,6 +361,7 @@ struct pheap
     uint64_t flags;
 #ifdef PHEAP_USE_LOCKS
     pheap_lock_t lock;
+    pheap_lock_t alloc_lock;
 #endif
     dlist_t huge_list;
     dlist_t mem_list;
@@ -389,19 +390,21 @@ pheap_inline static void pheap_unlock_internal_lock(pheap_internal_lock_t *lock)
     *lock = 0;
 }
 
-pheap_inline static void pheap_init_lock(pheap_t h)
+pheap_inline static void pheap_init_locks(pheap_t h)
 {
     if(h->flags & PHEAP_FLAG_THREADSAFE)
     {
         pheap_init_native_lock(&h->lock);
+        pheap_init_native_lock(&h->alloc_lock);
     }
 }
 
-pheap_inline static void pheap_uninit_lock(pheap_t h)
+pheap_inline static void pheap_uninit_locks(pheap_t h)
 {
     if(h->flags & PHEAP_FLAG_THREADSAFE)
     {
         pheap_uninit_native_lock(&h->lock);
+        pheap_uninit_native_lock(&h->alloc_lock);
     }   
 }
 
@@ -421,11 +424,27 @@ pheap_inline static void pheap_unlock(pheap_t h)
     }
 }
 
+pheap_inline static void pheap_alloc_lock(pheap_t h)
+{
+    if(h->flags & PHEAP_FLAG_THREADSAFE)
+    {
+        pheap_lock_native_lock(&h->alloc_lock);
+    }
+}
+
+pheap_inline static void pheap_alloc_unlock(pheap_t h)
+{
+    if(h->flags & PHEAP_FLAG_THREADSAFE)
+    {
+        pheap_unlock_native_lock(&h->alloc_lock);
+    }
+}
+
 #else
     #define pheap_lock_internal_lock(h)     (void)h
     #define pheap_unlock_internal_lock(h)   (void)h
-    #define pheap_init_lock(h)              (void)h
-    #define pheap_uninit_lock(h)            (void)h
+    #define pheap_init_locks(h)             (void)h
+    #define pheap_uninit_locks(h)           (void)h
     #define pheap_lock(h)                   (void)h
     #define pheap_unlock(h)                 (void)h
 #endif // PHEAP_USE_LOCKS
@@ -572,6 +591,8 @@ pheap_inline static pheap_allocation_t *allocate_from_existing(pheap_t h, int32_
     pheap_allocation_t *a = PHEAP_NULL;
     dlist_t *next;
 
+    pheap_lock(h);
+
     for(next = h->mem_list.next; next != &h->mem_list; next = next->next)
     {
         pheap_memblock_t *mem = (pheap_memblock_t *)next;
@@ -582,7 +603,8 @@ pheap_inline static pheap_allocation_t *allocate_from_existing(pheap_t h, int32_
             break;
         }
     }
-    
+
+    pheap_unlock(h);
     return a;   
 }
 
@@ -641,9 +663,11 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
         return PHEAP_NULL;
     }
 
+    pheap_alloc_lock(h);
+
     if(PHEAP_NULL != (a = allocate_from_existing(h, size, req_size)))
     {
-        return a;
+        goto release_lock;
     }
     //
     // No more bytes, allocate another block
@@ -653,7 +677,7 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
     if(alloc_size < req_size)
     {
         // Too large.
-        return PHEAP_NULL;
+        goto release_lock;
     }
 
     if(alloc_size < PHEAP_MEMBLOCK_SIZE_HINT)
@@ -665,16 +689,18 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
         alloc_size = pheap_roundup2(alloc_size, PHEAP_MEMBLOCK_SIZE_HINT);
     }
 
-    pheap_unlock(h);
     mem = pheap_native_alloc(alloc_size, pheap_is_exec(h->flags));
-    pheap_lock(h);
 
     if(PHEAP_NULL != mem)
     {
+        pheap_lock(h);
         memblock_init(h, mem, alloc_size);
         a = unchecked_allocate(mem, size, req_size);
+        pheap_unlock(h);
     }
 
+release_lock:
+    pheap_alloc_unlock(h);
     return a;
 }
 
@@ -950,20 +976,19 @@ void *pheap_alloc(pheap_t h, size_t n)
     }
 
     pheap_lock(h);
+    a = allocate_from_free_bin(h, (uint32_t)n);
+    pheap_unlock(h);
 
-    if(PHEAP_NULL != (a = allocate_from_free_bin(h, (uint32_t)n)))
+    if(PHEAP_NULL != a)
     {
-        pheap_unlock(h);
         return pheap_obj_to_mem(a);
     }
 
     if(PHEAP_NULL == (a = create_allocation(h, (uint32_t)n)))
     {
-        pheap_unlock(h);
         return PHEAP_NULL;
     }
 
-    pheap_unlock(h);
     return pheap_obj_to_mem(a);
 }
 
@@ -1234,7 +1259,7 @@ static pheap_inline pheap_t init_pheap(void *ptr, size_t n, uint32_t flags)
     }
 
     h->flags = flags;
-    pheap_init_lock(h);
+    pheap_init_locks(h);
 
     mb = (pheap_memblock_t *)(((uint8_t *)ptr) + pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT));
     memblock_init(h, mb, n - pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT));
@@ -1280,7 +1305,7 @@ pheap_t pheap_create(uint32_t flags)
 
 void pheap_destory(pheap_t h)
 {
-    pheap_uninit_lock(h);
+    pheap_uninit_locks(h);
 
     if(h->flags & PHEAP_FLAG_FIXED)
     {

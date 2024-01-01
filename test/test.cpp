@@ -372,7 +372,7 @@ int main()
 #ifdef PHEAP_FLAG_THREADSAFE
 		std::vector<std::thread> threads;
 		printf("Testing concurrent allocations against same heap...\n");
-		for(uint32_t i = 0; i < 64; ++i)
+		for(uint32_t i = 0; i < 128; ++i)
 		{
 			threads.push_back(std::thread([i, heap]()
 			{
