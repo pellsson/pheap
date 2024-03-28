@@ -27,15 +27,14 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
 // Solve compiler and architecture
 //
 #ifdef _MSC_VER
-
     #include <intrin.h>
 
     #if defined(_WIN64)
         #define PHEAP_WIN
-        typedef int64_t ssize_t;
+        typedef int64_t pheap_size_t;
     #elif defined(_WIN32)
         #define PHEAP_WIN
-        typedef int32_t ssize_t;
+        typedef int32_t pheap_size_t;
     #else
         #error Cant resolve what we are building for (CL).
     #endif
@@ -59,11 +58,15 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
     }
 
 #elif defined(__GNUC__)
-    #include <sys/types.h> // ssize_t
 
-    #if !defined(__x86__) && !defined(__x86_64__) && !defined(__arm__)
+    #if defined(__x86_64__) || defined(__arm64__)
+        typedef int64_t pheap_size_t;
+    #elif defined(__x86__) || defined(__arm__)
+        typedef int32_t pheap_size_t;
+    #else
         #error Unknown architecture. Please fix :)
     #endif
+        
 
     #if defined(__x86__) || defined(__x86_64__)
         #define pheap_trap() __asm__("int3")
@@ -116,7 +119,7 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
     }
 #endif
 
-#if defined(PHEAP_WIN)
+#if PHEAP_NATIVE_ALLOC == 1 && defined(PHEAP_WIN)
     #define WIN32_LEAN_AND_MEAN
     #include <windows.h>
     #ifndef pheap_yield
@@ -260,31 +263,12 @@ pheap_inline static void dlist_init(dlist_t *head)
     head->next = head->prev = head;
 }
 
-pheap_inline static int dlist_is_empty(const dlist_t *head)
-{
-    return head == head->next;
-}
-
 pheap_inline static void dlist_remove(dlist_t *entry)
 {
     dlist_t *prev = entry->prev;
     dlist_t *next = entry->next;
     prev->next = next;
     next->prev = prev;
-}
-
-pheap_inline static void *dlist_remove_tail(dlist_t *head)
-{
-    dlist_t *ret = head->prev;
-    dlist_remove(head);
-    return ret;
-}
-
-pheap_inline static void *dlist_remove_head(dlist_t *head)
-{
-    dlist_t *ret = head->next;
-    dlist_remove(head);
-    return ret;
 }
 
 pheap_inline static void dlist_insert_head(dlist_t *head, dlist_t *entry)
@@ -350,8 +334,8 @@ typedef struct pheap_memblock
     dlist_t list; // must be first
     dlist_t hash_list;
     struct pheap_allocation *prev_alloc;
-    ssize_t total_size;
-    ssize_t bytes_left;
+    pheap_size_t total_size;
+    pheap_size_t bytes_left;
     uint8_t *unused;
 }
 pheap_memblock_t;
@@ -569,7 +553,7 @@ pheap_inline static void take_memblock_bytes(pheap_memblock_t *mem, int32_t size
 
 pheap_inline static int memblock_can_alloc(const pheap_memblock_t *mem, int32_t alloc_size)
 {
-    return mem->bytes_left >= ((ssize_t)alloc_size + (ssize_t)sizeof(PHEAP_LIST_END));
+    return mem->bytes_left >= ((pheap_size_t)alloc_size + (pheap_size_t)sizeof(PHEAP_LIST_END));
 }
 
 pheap_inline static pheap_allocation_t *unchecked_allocate(pheap_memblock_t *mem, int32_t size, int32_t alloc_size)
@@ -653,7 +637,7 @@ pheap_inline static int32_t required_alloc_size(int32_t size)
 
 pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t size)
 {
-    ssize_t alloc_size;
+    pheap_size_t alloc_size;
     pheap_memblock_t *mem;
     pheap_allocation_t *a = PHEAP_NULL;
     int32_t req_size = required_alloc_size(size);
@@ -672,7 +656,7 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
     //
     // No more bytes, allocate another block
     //
-    alloc_size = ((ssize_t)pheap_roundup2(sizeof(*mem), PHEAP_ALIGNMENT)) + (ssize_t)(req_size * 2);
+    alloc_size = ((pheap_size_t)pheap_roundup2(sizeof(*mem), PHEAP_ALIGNMENT)) + (pheap_size_t)(req_size * 2);
 
     if(alloc_size < req_size)
     {
@@ -1323,7 +1307,7 @@ void pheap_destory(pheap_t h)
     for(dlist_t *it = h->mem_list.next; it != &h->mem_list;)
     {
         pheap_memblock_t *mb = (pheap_memblock_t *)it;
-        ssize_t n = mb->total_size + pheap_roundup2(sizeof(*mb), PHEAP_ALIGNMENT);
+        pheap_size_t n = mb->total_size + pheap_roundup2(sizeof(*mb), PHEAP_ALIGNMENT);
         dlist_t *next = it->next;
         //
         // The first allocated memory block (ie the last in this list), also hosts the pheap_t structure.
@@ -1409,6 +1393,8 @@ void pheap_g_free(void *p)
 #endif
 
 #ifdef PHEAP_TEST
+
+#define dlist_is_empty(head) (head == head->next)
 
 int pheap_test_is_pristine(pheap_t h)
 {
