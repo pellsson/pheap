@@ -1399,7 +1399,9 @@ void pheap_g_free(void *p)
 
 int pheap_test_is_pristine(pheap_t h)
 {
-    if(!dlist_is_empty(&h->huge_list))
+    dlist_t *huge = &h->huge_list;
+
+    if(!dlist_is_empty(huge))
     {
         return 0;
     }
@@ -1416,7 +1418,8 @@ int pheap_test_is_pristine(pheap_t h)
 
     for(int i = 0; i < PHEAP_SIZE_BITS; ++i)
     {
-        if(!dlist_is_empty(h->free_list + i))
+        dlist_t *fl = h->free_list + i;
+        if(!dlist_is_empty(fl))
         {
             return 0;
         }

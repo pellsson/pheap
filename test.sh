@@ -1,2 +1,2 @@
 set -e
-./build.sh && ./pheap-test
+DEBUG=yes ./build.sh && ./pheap-test

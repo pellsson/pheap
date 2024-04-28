@@ -277,6 +277,70 @@ static void test_realloc(pheap_t h)
 	}
 }
 
+static void test_fixed()
+{
+	static uint8_t fixed[32 * 1024 * 1024];
+	pheap_t h;
+
+ 	h = pheap_create_fixed(fixed, sizeof(fixed), 0);
+ 	test_true(h != NULL);
+
+	std::vector<void *> allocations;
+
+	for(int i = 0; i < 10000; ++i)
+	{
+		void *p;
+
+		if(allocations.size() && 0 == (rand() & 0x07))
+		{
+			auto it = allocations.begin() + (rand() % allocations.size());
+			printf("free: %p\n", *it);
+			pheap_free(h, *it);
+			allocations.erase(it);
+		}
+		uint32_t size = rand() % 1000;
+
+		if(allocations.size() && 0 == (rand() & 7))
+		{
+			auto it = allocations.begin() + (rand() % allocations.size());
+			printf("realloc: %p (%d)\n", *it, size);
+			p = pheap_realloc(h, *it, size);
+			allocations.erase(it);
+		}
+		else
+		{
+			printf("alloc (%d bytes)\n", size);
+			p = pheap_alloc(h, size);
+		}
+
+		if(NULL == p)
+		{
+			printf("OOM: %p (%d bytes)\n", p, size);
+			if(allocations.size())
+			{
+				auto it = allocations.begin() + (rand() % allocations.size());
+				printf("  Free %p\n", *it);
+				pheap_free(h, *it);
+				allocations.erase(it);
+			}
+		}
+		else
+		{
+			memset(p, 'A', size);
+			printf("Alloc: %p (%d bytes...)\n", p, size);
+			allocations.push_back(p);
+		}
+	}
+
+	for(const auto &ref : allocations)
+	{
+		// printf("Free all: %p\n", ref);
+		pheap_free(h, ref);
+	}
+
+	test_true((bool)pheap_test_is_pristine(h));
+}
+
 #if 0
 #include <windows.h>
 
@@ -332,8 +396,6 @@ int main()
 	for(uint32_t test = 0; test < num_tests; ++test)
 	{
 		printf("Testing with random seed: %d\n", seed);
-		srand(seed);
-		seed = rand();
 
 		pheap_t heap = pheap_create(flags);
 		pheap_free(heap, nullptr);
@@ -350,6 +412,14 @@ int main()
 		test_true(!pheap_test_is_pristine(heap));
 		pheap_free(heap, a);
 		test_true((bool)pheap_test_is_pristine(heap));
+
+		printf("Testing fixed heap....\n");
+		for(int i = 0; i < 100000; ++i)
+		{
+			srand(seed + i);
+			printf("SEED: %d\n", seed + i);
+			test_fixed();
+		}
 
 		printf("Testing variations of alloc vs. free order...\n");
 		for(uint32_t i = 0; i < 0x100; ++i)
