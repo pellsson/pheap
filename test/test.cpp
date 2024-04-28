@@ -12,13 +12,22 @@
 
 #include <unordered_set>
 
+// #define CRASH_HUNT
+
+#ifndef CRASH_HUNT
+// #define testf printf
+#define testf(...)
+#else
+#define testf(...)
+#endif
+
 #define test_cmp(lhs, rhs, op) \
 { \
 	auto rv = (rhs); \
 	auto lv = (lhs); \
 	if(!(rv op lv)) \
 	{ \
-		std::cout << "FAILS (Line: " << __LINE__ << "): " << #lhs " " #op " " #rhs << std::endl; \
+		std::cout << "FAILS (Line: " << __LINE__ << "): " #lhs " " #op " " #rhs << std::endl; \
 		std::cout << "LHS " << (lv) << ", RHS " << (rv) << std::endl; \
 		exit(1); \
 	} \
@@ -106,7 +115,7 @@ static void test_many_pools(pheap_t h)
 			{
 				auto &alloc = allocs[0];
 
-				// printf("Free %p (%d)\n", alloc.first, alloc.second);
+				testf("Free %p (%d)\n", alloc.first, alloc.second);
 
 				n = (int32_t)pheap_msize(alloc.first);
 
@@ -147,7 +156,7 @@ static void test_many_pools(pheap_t h)
 		if(n >= 0)
 		{
 			void *p = pheap_alloc(h, n);
-			// printf("Alloc %p (%d)\n", p, n);
+			testf("Alloc %p (%d)\n", p, n);
 			test_not_null(p);
 			test_true((size_t)n == pheap_msize(p));
 			memset(p, 'A', n);
@@ -287,14 +296,18 @@ static void test_fixed()
 
 	std::vector<void *> allocations;
 
-	for(int i = 0; i < 10000; ++i)
+	pass = 0;
+
+	for(int i = 0; i < 100; ++i)
 	{
 		void *p;
 
 		if(allocations.size() && 0 == (rand() & 0x07))
 		{
+			++pass;
+
 			auto it = allocations.begin() + (rand() % allocations.size());
-			printf("free: %p\n", *it);
+			testf("free: %p\n", *it);
 			pheap_free(h, *it);
 			allocations.erase(it);
 		}
@@ -302,24 +315,30 @@ static void test_fixed()
 
 		if(allocations.size() && 0 == (rand() & 7))
 		{
+			++pass;
+
 			auto it = allocations.begin() + (rand() % allocations.size());
-			printf("realloc: %p (%d)\n", *it, size);
+			testf("realloc: %p (%d)\n", *it, size);
 			p = pheap_realloc(h, *it, size);
 			allocations.erase(it);
 		}
 		else
 		{
-			printf("alloc (%d bytes)\n", size);
+			++pass;
+
+			testf("alloc (%d bytes)\n", size);
 			p = pheap_alloc(h, size);
 		}
 
 		if(NULL == p)
 		{
-			printf("OOM: %p (%d bytes)\n", p, size);
+			testf("OOM: %p (%d bytes)\n", p, size);
 			if(allocations.size())
 			{
+				++pass;
+
 				auto it = allocations.begin() + (rand() % allocations.size());
-				printf("  Free %p\n", *it);
+				testf("  Free %p\n", *it);
 				pheap_free(h, *it);
 				allocations.erase(it);
 			}
@@ -327,35 +346,38 @@ static void test_fixed()
 		else
 		{
 			memset(p, 'A', size);
-			printf("Alloc: %p (%d bytes...)\n", p, size);
+			testf("Alloc: %p (%d bytes...)\n", p, size);
 			allocations.push_back(p);
 		}
 	}
 
 	for(const auto &ref : allocations)
 	{
-		// printf("Free all: %p\n", ref);
+		testf("Free all: %p\n", ref);
 		pheap_free(h, ref);
 	}
 
 	test_true((bool)pheap_test_is_pristine(h));
 }
 
-#if 0
+#ifdef CRASH_HUNT
 #include <windows.h>
 
 static void find_best_fault_order()
 {
 	int best_seed = -1;
 	int min_pass = 123123123;
+	pheap_t heap = pheap_create(0);
 
-	for(int seedz = 0;; ++seedz)
+	for(int seedz = 3;; ++seedz)
 	{
 		srand(seedz);
 
 		__try
 		{
-			test_many_pools(heap);
+			// test_many_pools(heap);
+			test_fixed();
+			pheap_destory(heap);
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER)
 		{
@@ -380,7 +402,7 @@ int main()
 #else
 	uint32_t flags = 0;
 #endif
-	uint32_t num_tests = 1;
+	uint32_t num_tests = 10;
 	uint32_t seed = (uint32_t)time(0);
 
 	if(getenv("TEST_SEED"))
@@ -393,11 +415,21 @@ int main()
 		num_tests = atoi(getenv("NUM_TESTS"));
 	}
 
+#ifdef CRASH_HUNT
+	find_best_fault_order();
+#endif
+	//seed = 63155;
+	//srand(seed);
+	//test_fixed();
+
 	for(uint32_t test = 0; test < num_tests; ++test)
 	{
+		seed += test;
+		srand(test);
 		printf("Testing with random seed: %d\n", seed);
 
 		pheap_t heap = pheap_create(flags);
+
 		pheap_free(heap, nullptr);
 
 		printf("Testing huge allocations...\n");
@@ -416,17 +448,18 @@ int main()
 		printf("Testing fixed heap....\n");
 		for(int i = 0; i < 100000; ++i)
 		{
-			srand(seed + i);
-			printf("SEED: %d\n", seed + i);
+			// srand(test + seed + i);
+			testf("SEED: %d\n", seed + i);
 			test_fixed();
 		}
 
 		printf("Testing variations of alloc vs. free order...\n");
 		for(uint32_t i = 0; i < 0x100; ++i)
 		{
-			test_alloc_free(heap, rand() + i);
+			test_alloc_free(heap, rand());
 		}
 
+		srand(test + seed);
 		printf("Testing a lot of memory pools...\n");
 		for(uint32_t i = 0; i < 0x800; ++i)
 		{

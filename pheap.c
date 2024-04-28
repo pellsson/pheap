@@ -1073,12 +1073,13 @@ void *pheap_realloc(pheap_t h, void *p, size_t n)
             // Allocation is at the end of its memory block,
             // see if there are bytes left to increase the allocation...
             //
-            int32_t diff = (int32_t)(n - old_size);
+            int32_t alloc_diff = req_size - old_full;
+
             pheap_memblock_t *mb = find_memblock(h, curr);
-            if(memblock_can_alloc(mb, diff))
+            if(memblock_can_alloc(mb, alloc_diff))
             {
-                take_memblock_bytes(mb, diff);
-                curr->size += diff;
+                take_memblock_bytes(mb, alloc_diff);
+                set_allocated_size(curr, n, req_size);
             }
             else
             {
