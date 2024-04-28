@@ -642,17 +642,18 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
     pheap_allocation_t *a = PHEAP_NULL;
     int32_t req_size = required_alloc_size(size);
 
-    if(h->flags & PHEAP_FLAG_FIXED)
-    {
-        return PHEAP_NULL;
-    }
-
     pheap_alloc_lock(h);
 
     if(PHEAP_NULL != (a = allocate_from_existing(h, size, req_size)))
     {
         goto release_lock;
     }
+
+    if(h->flags & PHEAP_FLAG_FIXED)
+    {
+        goto release_lock;
+    }
+
     //
     // No more bytes, allocate another block
     //
