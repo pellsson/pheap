@@ -432,6 +432,8 @@ pheap_inline static void pheap_alloc_unlock(pheap_t h)
     #define pheap_uninit_locks(h)           (void)h
     #define pheap_lock(h)                   (void)h
     #define pheap_unlock(h)                 (void)h
+    #define pheap_alloc_lock(h)             (void)h
+    #define pheap_alloc_unlock(h)           (void)h
 #endif // PHEAP_USE_LOCKS
 
 static pheap_inline pheap_hash_t hash_pointer(const void *p)
