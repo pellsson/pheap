@@ -41,6 +41,9 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
 
     typedef volatile long pheap_internal_lock_t;
 
+    #pragma warning(push)
+    #pragma warning(disable: 4366) // warning C4366: The result of the unary '&' operator may be unaligned
+
 #if defined(_M_ARM) || defined(_M_ARM64)
     #define pheap_pause() __yield()
 #else
@@ -1463,4 +1466,9 @@ int pheap_test_is_pristine(pheap_t h)
 }
 
 #endif // PHEAP_TEST
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 
