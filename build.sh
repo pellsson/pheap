@@ -35,4 +35,9 @@ do_verbose "$AR crs libpheap.a $OBJDIR/pheap.o"
 echo "Building pheap tests ($CXX)"
 do_verbose "$CC $TEST_DEFS $CFLAGS pheap.c -o $OBJDIR/pheap-test.o -c"
 do_verbose "$CXX $TEST_DEFS $CFLAGS test/test.cpp $OBJDIR/pheap-test.o -o pheap-test"
+echo "Building pheap tests with override ($CXX)"
+do_verbose "$CC $TEST_DEFS -DPHEAP_OVERRIDE_SYSTEM_HEADER=\"test/test_system.h\" -DPHEAP_OVERRIDE_LOCK_HEADER=\"test/test_locks.h\" $CFLAGS pheap.c -o $OBJDIR/pheap-test-ext.o -c"
+do_verbose "$CXX $TEST_DEFS $CFLAGS test/test.cpp $OBJDIR/pheap-test-ext.o -o pheap-test-ext"
+
+
 

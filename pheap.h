@@ -8,71 +8,92 @@
 //
 
 // PHEAP_ALIGNMENT
-// Sets memory alignment.
+// Sets memory alignment. Must be a power of two.
+// Set to 1 if you want no alignment.
 #ifndef PHEAP_ALIGNMENT
-	#define PHEAP_ALIGNMENT	0x10 // **MUST** be power of two. Set to 1 if you want no alignment
+	#define PHEAP_ALIGNMENT 0x10
 #endif
 
-// PHEAP_USE_C_STDLIB
-// Set this to zero if you do not want to use the standard C library headers (requires extra work, read below).
-#ifndef PHEAP_USE_C_STD
-	#define PHEAP_USE_C_STD 1
+// PHEAP_OVERRIDE_SYSTEM_HEADER
+// Set this to the path of a header that implements all pheap system/CRT requirements.
+//
+// Requirements:
+//   * size_t, intNN_t, uintNN_t, intptr_t, uintptr_t
+//   * pheap_memset (like memset), pheap_memcpy (like memcpy)
+//   * And:
+//       void *pheap_system_alloc(size_t n, int exec);
+//       void pheap_system_free(void *p, size_t n);
+//
+// #define PHEAP_OVERRIDE_SYSTEM_HEADER "pheap_system.h"
+
+#ifdef PHEAP_OVERRIDE_SYSTEM_HEADER
+    #include PHEAP_OVERRIDE_SYSTEM_HEADER
+
+    #define PHEAP_SYSTEM_ALLOC 0
+#else
+    #include <stddef.h>   // size_t
+    #include <stdint.h>   // uintNN_t, intNN_t
+    #include <string.h>   // memset, memcpy
+
+    #define pheap_memset  memset
+    #define pheap_memcpy  memcpy
+
+    #define PHEAP_SYSTEM_ALLOC 1
 #endif
 
-// PHEAP_NATIVE_ALLOC
-// Use OS-native (VirtualAlloc or mmap) allocation functions.
-// If not defined, your code must implement the following functions:
-//    void *pheap_native_alloc(size_t n, int exec);
-//    void pheap_native_destroy(void *p, size_t n);
-#ifndef PHEAP_NATIVE_ALLOC
-	#define PHEAP_NATIVE_ALLOC 1
-#endif
+// PHEAP_OVERRIDE_LOCK_HEADER
+// Set this to the path of a header that implements all pheap locking requirements.
+// If unset, you can configure the internal lock used by setting PHEAP_LOCK_PRIMITIVE.
+//
+// Lock override header must define:
+//   * pheap_lock_t - typedef of the lock primitive to use
+//   * void pheap_uninit_lock(pheap_lock_t *lock);
+//   * void pheap_init_lock(pheap_lock_t *lock);
+//   * void pheap_lock_lock(pheap_lock_t *lock);
+//   * void pheap_unlock_lock(pheap_lock_t *lock);
+//
+#ifdef PHEAP_OVERRIDE_LOCK_HEADER
+    #include PHEAP_OVERRIDE_LOCK_HEADER
+    #define PHEAP_LOCK_PRIMITIVE -1
+#else
+	// PHEAP_LOCK_PRIMITIVE
+	// Set to one of the following:
+	#define PHEAP_NO_LOCK        0  // Disables all locks
+	#define PHEAP_WIN32_LOCK     1  // Uses native Win32 CRITICAL_SECTION
+	#define PHEAP_PTHREAD_LOCK   2  // Uses pthread_mutex_t
+	#define PHEAP_INTERNAL_LOCK  3  // Uses internal cross-platform spinlock
 
-// PHEAP_LOCK_PRIMITIVE
-// Can be one of the following:
-#define PHEAP_NO_LOCK 0			// Completely disable all locks. Trying to create thread-safe heap will fail.
-#define PHEAP_WIN32_LOCK 1		// Use native win32-lock (CRITICAL_SECTION)
-#define PHEAP_PTHREAD_LOCK 2	// Use pthread_mutex_t
-#define PHEAP_INTERNAL_LOCK 3	// Use cross-platform internal spinlock
-#define PHEAP_CUSTOM_LOCK 4		// Use your own lock implementation. See pheap.c for information on how.
-
-#ifndef PHEAP_LOCK_PRIMITIVE
-	#ifdef _WIN32
-		#define PHEAP_LOCK_PRIMITIVE PHEAP_WIN32_LOCK
-	#else
-		#define PHEAP_LOCK_PRIMITIVE PHEAP_PTHREAD_LOCK
+	#ifndef PHEAP_LOCK_PRIMITIVE
+	    #ifdef _WIN32
+	        #define PHEAP_LOCK_PRIMITIVE PHEAP_WIN32_LOCK
+	    #else
+	        #define PHEAP_LOCK_PRIMITIVE PHEAP_PTHREAD_LOCK
+	    #endif
 	#endif
 #endif
 
-#if PHEAP_LOCK_PRIMITIVE == PHEAP_CUSTOM_LOCK
-	#error Typedef your custom lock type here to pheap_lock_t. The functions below must also be implemented as they are referenced by pheap.c
-    // void pheap_init_native_lock(pheap_lock_t *lock);
-    // void pheap_uninit_native_lock(pheap_lock_t *lock);
-    // void pheap_lock_native_lock(pheap_lock_t *lock);
-    // void pheap_unlock_native_lock(pheap_lock_t *lock);
-#endif
-
 // PHEAP_INTERNAL_DEBUG
-// If the tests fail or crash, define this to help you with debugging.
+// If tests crash or fail, enable this for debugging support.
 #ifndef PHEAP_INTERNAL_DEBUG
 	#define PHEAP_INTERNAL_DEBUG 0
 #endif
 
 // PHEAP_PAGE_SIZE
-// Size of the smallest native page (if unsure just leave it).
+// Native page size. Must be a power of two.
+// If unsure, leave as is.
 #ifndef PHEAP_PAGE_SIZE
-	#define PHEAP_PAGE_SIZE 0x1000 // *MUST* be a power of 2
+	#define PHEAP_PAGE_SIZE 0x1000
 #endif
 
 // PHEAP_USE_GLOBAL_HEAP
-// Will create a global heap that can be accessed anywhere.
-// If PHEAP_LOCK_PRIMITIVE is not PHEAP_NO_LOCK, the global heap is thread-safe
+// Enables a global heap accessible anywhere.
+// If locking is enabled, it will be thread-safe.
 #ifndef PHEAP_USE_GLOBAL_HEAP
 	#define PHEAP_USE_GLOBAL_HEAP 0
 #endif
 
 // PHEAP_GLOBAL_REPLACE_MALLOC
-// If this is defined, the global PHEAP will take the place of malloc & friends.
+// If enabled, the global heap replaces malloc and related functions.
 #ifndef PHEAP_GLOBAL_REPLACE_MALLOC
 	#define PHEAP_GLOBAL_REPLACE_MALLOC 0
 #endif
@@ -91,33 +112,6 @@
 	#define realloc pheap_g_realloc
 	#define free pheap_g_free
 	#define msize pheap_msize
-#endif
-
-#if PHEAP_USE_C_STD == 1
-	#include <stddef.h>
-	#include <stdint.h>
-	#include <string.h>
-
-	#define pheap_memset	memset
-	#define pheap_memcpy	memcpy
-	#define PHEAP_NULL		NULL
-#else
-	#error If you dont have a C-runtime, you must manually implement the PHEAP requirements.
-	//
-	// ### PHEAP requirements ###
-	//
-	// PHEAP_NULL - Invalid pointer address, usually 0
-	// pheap_memset - void *pheap_memset(void * ptr, int value, size_t num) (return value not used).
-	// pheap_memcpy - void *pheap_memcpy(void * dest, const void *src, size_t n) (return value not used).
-	// size_t - Integer big enough to hold biggest possible allocation.
-	// And the stdint.h types:
-	//    uint8_t, uint16_t, uint32_t, uint64_t, uintptr_t
-	//    int8_t, int16_t, int32_t, int64_t, intptr_t
-	//
-	// Optionally, if you use PHEAP_INTERNAL_LOCK, you can define
-	// pheap_yield (commonly a sleep(0)) which will greatly increase
-	// performance (and reduce cpu-usage) on the internal locks.
-	//
 #endif
 
 //
@@ -145,8 +139,22 @@ typedef struct pheap * pheap_t;
 	#define PHEAP_FLAG_THREADSAFE 0x02 // Make the heap thread-safe.
 #endif
 
+
+typedef void *(*pheap_mem_alloc)(size_t n, void *context);
+typedef void (*pheap_mem_free)(void *p, size_t n, void *context);
+
+typedef struct pheap_alloc_config
+{
+	pheap_mem_alloc custom_alloc;
+	pheap_mem_free custom_free;
+	void *context;
+}
+pheap_alloc_config_t;
+
 pheap_t pheap_create_fixed(void *memory, size_t size, uint32_t flags);
 pheap_t pheap_create(uint32_t flags);
+pheap_t pheap_create_custom(const pheap_alloc_config_t *config);
+
 void pheap_destory(pheap_t h);
 
 void *pheap_alloc(pheap_t h, size_t size);

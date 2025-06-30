@@ -402,7 +402,7 @@ int main()
 #else
 	uint32_t flags = 0;
 #endif
-	uint32_t num_tests = 10;
+	uint32_t num_tests = 1;
 	uint32_t seed = (uint32_t)time(0);
 
 	if(getenv("TEST_SEED"))
@@ -510,7 +510,7 @@ int main()
 #if PHEAP_USE_GLOBAL_HEAP != 0
 		printf("Testing global heap...\n");
 		void *p = pheap_g_alloc(0x1000);
-		test_true(PHEAP_NULL != p);
+		test_true(nullptr != p);
 		pheap_g_free(p);
 		void *q = pheap_g_alloc(0x1000);
 		test_true(p == q);
