@@ -437,7 +437,7 @@ pheap_inline static void unlock_alloc(pheap_t h)
     #define lock_internal_lock(h)     (void)h
     #define unlock_internal_lock(h)   (void)h
     #define init_locks(h)             (void)h
-    #define uninit_locks(h)           (void)h
+    #define destroy_locks(h)          (void)h
     #define lock_pheap(h)             (void)h
     #define unlock_pheap(h)           (void)h
     #define lock_alloc(h)             (void)h
