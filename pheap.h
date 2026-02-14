@@ -108,7 +108,7 @@
 
 #if PHEAP_GLOBAL_REPLACE_MALLOC != 0
 	#define malloc pheap_g_alloc
-	#define calloc(a, b) pheap_g_zalloc(a * b);
+	#define calloc(a, b) pheap_g_zalloc(((size_t)(a)) * ((size_t)(b)))
 	#define realloc pheap_g_realloc
 	#define free pheap_g_free
 	#define msize pheap_msize
@@ -120,7 +120,7 @@
 #ifdef PHEAP_TEST
 	#define PHEAP_MEMBLOCK_SIZE_HINT 0x4000
 #else
-	#define PHEAP_MEMBLOCK_SIZE_HINT 32 * 0x100000
+	#define PHEAP_MEMBLOCK_SIZE_HINT (32 * 0x100000)
 #endif
 
 #ifdef __cplusplus
@@ -155,7 +155,7 @@ pheap_t pheap_create_fixed(void *memory, size_t size, uint32_t flags);
 pheap_t pheap_create(uint32_t flags);
 pheap_t pheap_create_custom(const pheap_alloc_config_t *config);
 
-void pheap_destory(pheap_t h);
+void pheap_destroy(pheap_t h);
 
 void *pheap_alloc(pheap_t h, size_t size);
 void *pheap_zalloc(pheap_t h, size_t size);

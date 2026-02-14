@@ -64,21 +64,21 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
 
 #elif defined(__GNUC__)
 
-    #if defined(__x86_64__) || defined(__arm64__)
+    #if defined(__x86_64__) || defined(__aarch64__)
         typedef int64_t pheap_size_t;
-    #elif defined(__x86__) || defined(__arm__)
+    #elif defined(__i386__) || defined(__arm__)
         typedef int32_t pheap_size_t;
     #else
         #error Unknown architecture. Please fix :)
     #endif
-        
 
-    #if defined(__x86__) || defined(__x86_64__)
+
+    #if defined(__i386__) || defined(__x86_64__)
         #define pheap_trap() __asm__("int3")
         #define pheap_pause() __asm__("pause")
-    #elif defined(__arm__)
-        #define pheap_trap() __asm__("bkpt")
-        #define pheap_pause() __asm__("yield")
+    #elif defined(__arm__) || defined(__aarch64__)
+        #define pheap_trap() __builtin_trap()
+        #define pheap_pause() __asm__ __volatile__("yield")
     #else
         #error Cant resolve what we are building for (GCC-esk)
     #endif
@@ -90,10 +90,11 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
     #endif
 
     typedef volatile uint32_t pheap_internal_lock_t;
-    
+
     #define pheap_inline __attribute__((always_inline))
     #define bitscan_forward32(v) (uint32_t)__builtin_ctz((unsigned int)(v))
 
+    #if defined(__i386__) || defined(__x86_64__)
     pheap_inline static int pheap_atomic_testandset(volatile uint32_t *lock, uint32_t bit)
     {
         uint32_t carry = 0;
@@ -102,6 +103,15 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
             : "+m" (carry), "=m" (*lock) : "r" (bit));
         return carry;
     }
+    #else
+    // Portable implementation using GCC builtins for ARM and other architectures
+    pheap_inline static int pheap_atomic_testandset(volatile uint32_t *lock, uint32_t bit)
+    {
+        uint32_t mask = 1u << bit;
+        uint32_t old = __sync_fetch_and_or(lock, mask);
+        return (old & mask) ? 1 : 0;
+    }
+    #endif
 #else
     #error Your compiler is not recognized.
     
@@ -153,8 +163,8 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
     #include <sys/mman.h>
     
     #ifndef pheap_yield
-        #include <unistd.h> // Probably kills osx?
-        #define pheap_yield() sleep(0)
+        #include <sched.h>
+        #define pheap_yield() sched_yield()
     #endif
     //
     // Assume everything but Windows has mmap()
@@ -237,7 +247,14 @@ typedef uint8_t pheap_hash_t;
 #define pheap_roundup2(val, by) (((val) + ((by) - 1)) & (~((by) - 1)))
 
 #define pheap_next_allocation(a)        (void *)(((uint8_t *)a) + get_full_alloc_size(a))
-// TODO : I think this is wrong...?
+//
+// Determines search direction within a free bin.
+// Each free bin covers sizes [2^k, 2^(k+1)-1]. The bucket_upper_bound (s) is 2^(k+1).
+// This macro simplifies to: n > (s - s/4) = n > (3s/4)
+// Returns 1 (search forward/head-to-tail) if n is in the upper quarter of the bucket,
+// meaning we want larger blocks first. Returns 0 (search backward/tail-to-head) if n
+// is in the lower 3/4, searching for smaller blocks to reduce fragmentation.
+//
 #define pheap_search_dir_forward(n, s)  ((n > ((s) - (((s) - ((s) >> 1)) / 2))) ? 1 : 0)
 
 #define pheap_obj_to_mem(a) \
@@ -368,7 +385,7 @@ pheap_static_assert((PHEAP_ALLOC_OBJ_SIZE * 2) <= (PHEAP_EXTRA_SIZE_MASK + 1), o
 
 pheap_inline static void lock_internal_lock(pheap_internal_lock_t *lock)
 {
-    while(pheap_atomic_testandset(lock, 1))
+    while(pheap_atomic_testandset(lock, 0))
     {
 #ifdef pheap_yield
         pheap_yield();
@@ -1356,7 +1373,7 @@ pheap_t pheap_create_custom(const pheap_alloc_config_t *config)
     return h;
 }
 
-void pheap_destory(pheap_t h)
+void pheap_destroy(pheap_t h)
 {
     destroy_locks(h);
 
