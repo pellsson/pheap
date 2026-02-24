@@ -1350,7 +1350,7 @@ pheap_t pheap_create(uint32_t flags)
     return init_pheap(ptr, size, flags & ~PHEAP_FLAG_FIXED);
 }
 
-pheap_t pheap_create_custom(const pheap_alloc_config_t *config)
+pheap_t pheap_create_custom(uint32_t flags, const pheap_alloc_config_t *config)
 {
     pheap_t h;
     void *ptr;
@@ -1361,7 +1361,7 @@ pheap_t pheap_create_custom(const pheap_alloc_config_t *config)
         return PHEAP_NULL;
     }
 
-    if(PHEAP_NULL != (h = init_pheap(ptr, size, 0)))
+    if(PHEAP_NULL != (h = init_pheap(ptr, size, (flags & ~PHEAP_FLAG_FIXED))))
     {
         pheap_memcpy(&h->config, config, sizeof(h->config));
     }

@@ -120,7 +120,9 @@
 #ifdef PHEAP_TEST
 	#define PHEAP_MEMBLOCK_SIZE_HINT 0x4000
 #else
-	#define PHEAP_MEMBLOCK_SIZE_HINT (32 * 0x100000)
+	#ifndef PHEAP_MEMBLOCK_SIZE_HINT
+		#define PHEAP_MEMBLOCK_SIZE_HINT (32 * 0x100000)
+	#endif
 #endif
 
 #ifdef __cplusplus
@@ -153,7 +155,7 @@ pheap_alloc_config_t;
 
 pheap_t pheap_create_fixed(void *memory, size_t size, uint32_t flags);
 pheap_t pheap_create(uint32_t flags);
-pheap_t pheap_create_custom(const pheap_alloc_config_t *config);
+pheap_t pheap_create_custom(uint32_t flags, const pheap_alloc_config_t *config);
 
 void pheap_destroy(pheap_t h);
 
