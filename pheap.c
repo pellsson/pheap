@@ -137,9 +137,9 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
 #if PHEAP_SYSTEM_ALLOC == 1 && defined(PHEAP_WIN)
     #define WIN32_LEAN_AND_MEAN
     #include <windows.h>
-    #ifndef pheap_yield
-        #define pheap_yield() Sleep(0)
-    #endif
+    //#ifndef pheap_yield
+    //    #define pheap_yield() Sleep(0)
+    //#endif
 #endif
 
 #if PHEAP_SYSTEM_ALLOC == 1
