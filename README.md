@@ -74,7 +74,7 @@ pheap_t pheap_create(uint32_t flags);
 pheap_t pheap_create_fixed(void *memory, size_t size, uint32_t flags);
 
 // Create a heap with custom memory allocation callbacks
-pheap_t pheap_create_custom(const pheap_alloc_config_t *config);
+pheap_t pheap_create_custom(uint32_t flags, const pheap_alloc_config_t *config);
 ```
 
 ### Memory Operations
@@ -124,6 +124,8 @@ Configure pheap by defining these macros before including `pheap.h`. All options
 | `PHEAP_PAGE_SIZE` | `0x1000` | Native page size (must be power of two) |
 | `PHEAP_USE_GLOBAL_HEAP` | `0` | Enable global heap accessible anywhere |
 | `PHEAP_GLOBAL_REPLACE_MALLOC` | `0` | Replace malloc/calloc/realloc/free with global heap |
+| `PHEAP_MEMBLOCK_SIZE_HINT` | `32 * 0x100000` | Default memory block size (must be >= page size) |
+| `PHEAP_USE_THREAD_CACHE` | `0` | Per-thread allocation cache for the global heap (requires `PHEAP_USE_GLOBAL_HEAP=1`) |
 | `PHEAP_INTERNAL_DEBUG` | `0` | Enable debugging support for tests |
 
 ### Lock Configuration
@@ -206,10 +208,11 @@ void my_free(void *p, size_t n, void *context) {
 pheap_alloc_config_t config = {
     .custom_alloc = my_alloc,
     .custom_free = my_free,
-    .context = my_pool
+    .context = my_pool,
+    .memblock_size = 0  // 0 = use default
 };
 
-pheap_t heap = pheap_create_custom(&config);
+pheap_t heap = pheap_create_custom(0, &config);
 ```
 
 ## Building and Testing

@@ -108,7 +108,7 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
     pheap_inline static int pheap_atomic_testandset(volatile uint32_t *lock, uint32_t bit)
     {
         uint32_t mask = 1u << bit;
-        uint32_t old = __sync_fetch_and_or(lock, mask);
+        uint32_t old = __atomic_fetch_or(lock, mask, __ATOMIC_ACQUIRE);
         return (old & mask) ? 1 : 0;
     }
     #endif
@@ -137,9 +137,9 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
 #if PHEAP_SYSTEM_ALLOC == 1 && defined(PHEAP_WIN)
     #define WIN32_LEAN_AND_MEAN
     #include <windows.h>
-    //#ifndef pheap_yield
-    //    #define pheap_yield() Sleep(0)
-    //#endif
+    #ifndef pheap_yield
+        #define pheap_yield() Sleep(0)
+    #endif
 #endif
 
 #if PHEAP_SYSTEM_ALLOC == 1
@@ -192,7 +192,7 @@ pheap_static_assert(PHEAP_MEMBLOCK_SIZE_HINT >= PHEAP_PAGE_SIZE, hint_too_small)
 
 #define pheap_is_exec(flags) (((flags) & PHEAP_FLAG_EXEC) ? 1 : 0)
 
-#if PHEAP_LOCK_PRIMITIVE != PHEAP_NO_LOCK
+#if PHEAP_HAS_LOCKS
     #define PHEAP_USE_LOCKS
 #endif
 
@@ -368,6 +368,7 @@ pheap_memblock_t;
 struct pheap
 {
     uint64_t flags;
+    size_t memblock_size;
     pheap_alloc_config_t config;
 #ifdef PHEAP_USE_LOCKS
     pheap_lock_t lock;
@@ -385,19 +386,47 @@ pheap_static_assert((PHEAP_ALLOC_OBJ_SIZE * 2) <= (PHEAP_EXTRA_SIZE_MASK + 1), o
 
 pheap_inline static void lock_internal_lock(pheap_internal_lock_t *lock)
 {
-    while(pheap_atomic_testandset(lock, 0))
+    uint32_t spins = 0;
+    for(;;)
     {
-#ifdef pheap_yield
-        pheap_yield();
+        //
+        // TTAS: spin on plain load first to avoid bus traffic,
+        // only attempt the atomic when the lock looks free.
+        //
+#ifdef _MSC_VER
+        if(0 == *lock)
 #else
-        pheap_pause();
+        if(0 == __atomic_load_n(lock, __ATOMIC_RELAXED))
 #endif
+        {
+            if(!pheap_atomic_testandset(lock, 0))
+            {
+                return;
+            }
+        }
+        if(spins < 32)
+        {
+            pheap_pause();
+        }
+        else
+        {
+#ifdef pheap_yield
+            pheap_yield();
+#else
+            pheap_pause();
+#endif
+        }
+        ++spins;
     }
 }
 
 pheap_inline static void unlock_internal_lock(pheap_internal_lock_t *lock)
 {
-    *lock = 0;
+#ifdef _MSC_VER
+    _InterlockedExchange(lock, 0);
+#else
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+#endif
 }
 
 pheap_inline static void init_locks(pheap_t h)
@@ -461,9 +490,9 @@ pheap_inline static void unlock_alloc(pheap_t h)
     #define unlock_alloc(h)           (void)h
 #endif // PHEAP_USE_LOCKS
 
-static pheap_inline pheap_hash_t hash_pointer(const void *p)
+static pheap_inline pheap_hash_t hash_pointer(const void *p, size_t memblock_size)
 {
-    return (pheap_hash_t)(((uintptr_t)p) / PHEAP_MEMBLOCK_SIZE_HINT);
+    return (pheap_hash_t)(((uintptr_t)p) / memblock_size);
 }
 
 #if PHEAP_INTERNAL_DEBUG == 1
@@ -614,14 +643,14 @@ pheap_inline static int memblock_can_alloc(const pheap_memblock_t *mem, int32_t 
     return mem->bytes_left >= ((pheap_size_t)alloc_size + (pheap_size_t)sizeof(PHEAP_LIST_END));
 }
 
-pheap_inline static pheap_allocation_t *unchecked_allocate(pheap_memblock_t *mem, int32_t size, int32_t alloc_size)
+pheap_inline static pheap_allocation_t *unchecked_allocate(pheap_t h, pheap_memblock_t *mem, int32_t size, int32_t alloc_size)
 {
     pheap_allocation_t *a = (pheap_allocation_t *)mem->unused;
 
     take_memblock_bytes(mem, alloc_size);
     set_previous(a, mem->prev_alloc);
     set_allocated_size(a, size, alloc_size);
-    a->mem_bucket = (hash_pointer(mem) % PHEAP_MEMBLOCK_BUCKETS);
+    a->mem_bucket = (hash_pointer(mem, h->memblock_size) % PHEAP_MEMBLOCK_BUCKETS);
 
     mem->prev_alloc = a;
 
@@ -641,7 +670,7 @@ pheap_inline static pheap_allocation_t *allocate_from_existing(pheap_t h, int32_
 
         if(memblock_can_alloc(mem, alloc_size))
         {
-            a = unchecked_allocate(mem, size, alloc_size);
+            a = unchecked_allocate(h, mem, size, alloc_size);
             break;
         }
     }
@@ -673,7 +702,7 @@ pheap_inline static pheap_memblock_t *find_memblock(pheap_t h, const pheap_alloc
 
 pheap_inline static void memblock_init(pheap_t h, pheap_memblock_t *mem, size_t alloced)
 {
-    uint32_t hash_bucket = (hash_pointer(mem) % PHEAP_MEMBLOCK_BUCKETS);
+    uint32_t hash_bucket = (hash_pointer(mem, h->memblock_size) % PHEAP_MEMBLOCK_BUCKETS);
 
     dlist_insert_head(&h->mem_list, &mem->list);
     dlist_insert_head(&h->mem_buckets[hash_bucket], &mem->hash_list);
@@ -723,13 +752,13 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
         goto release_lock;
     }
 
-    if(alloc_size < PHEAP_MEMBLOCK_SIZE_HINT)
+    if(alloc_size < (pheap_size_t)h->memblock_size)
     {
-        alloc_size = PHEAP_MEMBLOCK_SIZE_HINT;
+        alloc_size = h->memblock_size;
     }
     else
     {
-        alloc_size = pheap_roundup2(alloc_size, PHEAP_MEMBLOCK_SIZE_HINT);
+        alloc_size = pheap_roundup2(alloc_size, h->memblock_size);
     }
 
     mem = pheap_alloc_mem(h, alloc_size);
@@ -738,7 +767,7 @@ pheap_inline static pheap_allocation_t *create_allocation(pheap_t h, int32_t siz
     {
         lock_pheap(h);
         memblock_init(h, mem, alloc_size);
-        a = unchecked_allocate(mem, size, req_size);
+        a = unchecked_allocate(h, mem, size, req_size);
         unlock_pheap(h);
     }
 
@@ -1162,6 +1191,55 @@ void *pheap_realloc(pheap_t h, void *p, size_t n)
 
         if(avail < req_size)
         {
+            //
+            // The free block after us is too small. Check if we can coalesce further:
+            // either into end-of-memblock bytes, or into a second free block.
+            //
+            pheap_allocation_t *after_free = pheap_next_allocation(next);
+
+            if(PHEAP_LIST_END == after_free->prev_off)
+            {
+                //
+                // [curr] [free(small)] [END] - try extending into memblock tail
+                //
+                pheap_memblock_t *mb = find_memblock(h, curr);
+                int32_t total_avail = avail + (int32_t)mb->bytes_left;
+
+                if(total_avail >= req_size)
+                {
+                    int32_t extra_needed = req_size - avail;
+                    if(memblock_can_alloc(mb, extra_needed))
+                    {
+                        unlink_free(next);
+                        merge_free(curr, next);
+                        take_memblock_bytes(mb, extra_needed);
+                        curr->size += extra_needed;
+                        shrink_and_split(h, curr, (int32_t)n, curr->size);
+                        mb->prev_alloc = curr;
+                        unlock_pheap(h);
+                        return p;
+                    }
+                }
+            }
+            else if(0 == (after_free->extra & PHEAP_AFLAG_IN_USE))
+            {
+                //
+                // [curr] [free(small)] [free] [???] - coalesce both free blocks
+                //
+                int32_t total_avail = avail + get_full_alloc_size(after_free);
+
+                if(total_avail >= req_size)
+                {
+                    unlink_free(next);
+                    unlink_free(after_free);
+                    merge_free(curr, next);
+                    merge_free(curr, after_free);
+                    shrink_and_split(h, curr, (int32_t)n, total_avail);
+                    unlock_pheap(h);
+                    return p;
+                }
+            }
+
             unlock_pheap(h);
             return simple_realloc(h, p, n);
         }
@@ -1183,7 +1261,7 @@ void *pheap_realloc(pheap_t h, void *p, size_t n)
 
 void pheap_free(pheap_t h, void *p)
 {
-    pheap_allocation_t *a = pheap_mem_to_obj(p);
+    pheap_allocation_t *a;
     pheap_allocation_t *prev;
     pheap_allocation_t *next;
 
@@ -1191,6 +1269,8 @@ void pheap_free(pheap_t h, void *p)
     {
         return;
     }
+
+    a = pheap_mem_to_obj(p);
 
     // todo assert fix and so on
     if(0 == (PHEAP_AFLAG_IN_USE & a->extra))
@@ -1306,6 +1386,7 @@ static pheap_inline pheap_t init_pheap(void *ptr, size_t n, uint32_t flags)
     }
 
     h->flags = flags;
+    h->memblock_size = PHEAP_MEMBLOCK_SIZE_HINT;
     init_locks(h);
 
     mb = (pheap_memblock_t *)(((uint8_t *)ptr) + pheap_roundup2(sizeof(*h), PHEAP_ALIGNMENT));
@@ -1354,7 +1435,8 @@ pheap_t pheap_create_custom(uint32_t flags, const pheap_alloc_config_t *config)
 {
     pheap_t h;
     void *ptr;
-    size_t size = PHEAP_MEMBLOCK_SIZE_HINT;
+    size_t mbs = config->memblock_size ? config->memblock_size : PHEAP_MEMBLOCK_SIZE_HINT;
+    size_t size = mbs;
 
     if(PHEAP_NULL == (ptr = config->custom_alloc(size, (void *)config->context)))
     {
@@ -1363,6 +1445,7 @@ pheap_t pheap_create_custom(uint32_t flags, const pheap_alloc_config_t *config)
 
     if(PHEAP_NULL != (h = init_pheap(ptr, size, (flags & ~PHEAP_FLAG_FIXED))))
     {
+        h->memblock_size = mbs;
         pheap_memcpy(&h->config, config, sizeof(h->config));
     }
     else
@@ -1418,30 +1501,263 @@ void pheap_destroy(pheap_t h)
 #if PHEAP_USE_GLOBAL_HEAP != 0
 
 static pheap_internal_lock_t g_init_lock = 0;
-static volatile pheap_t g_pheap = PHEAP_NULL;
+static pheap_t g_pheap = PHEAP_NULL;
+
+pheap_inline static pheap_t pheap_global_load(void)
+{
+#ifdef _MSC_VER
+    return (pheap_t)_InterlockedCompareExchangePointer((volatile PVOID *)&g_pheap, PHEAP_NULL, PHEAP_NULL);
+#else
+    return __atomic_load_n(&g_pheap, __ATOMIC_ACQUIRE);
+#endif
+}
+
+pheap_inline static void pheap_global_store(pheap_t h)
+{
+#ifdef _MSC_VER
+    _InterlockedExchangePointer((volatile PVOID *)&g_pheap, h);
+#else
+    __atomic_store_n(&g_pheap, h, __ATOMIC_RELEASE);
+#endif
+}
 
 pheap_inline static int pheap_global_init(void)
 {
-    if(PHEAP_NULL == g_pheap)
+    if(PHEAP_NULL == pheap_global_load())
     {
         uint32_t flags = 0;
 #ifdef PHEAP_USE_LOCKS
         flags = PHEAP_FLAG_THREADSAFE;
 #endif
         lock_internal_lock(&g_init_lock);
-        if(PHEAP_NULL == g_pheap)
+        if(PHEAP_NULL == pheap_global_load())
         {
-            g_pheap = pheap_create(flags);
-            if(PHEAP_NULL == g_pheap)
+            pheap_t h = pheap_create(flags);
+            if(PHEAP_NULL == h)
             {
+                unlock_internal_lock(&g_init_lock);
                 pheap_trap();
                 return 0;
             }
+            pheap_global_store(h);
         }
         unlock_internal_lock(&g_init_lock);
     }
     return 1;
 }
+
+#if PHEAP_USE_THREAD_CACHE != 0
+
+#define PHEAP_TCACHE_BINS       8
+#define PHEAP_TCACHE_CAPACITY   32
+#define PHEAP_TCACHE_MAX_SIZE   2048
+#define PHEAP_TCACHE_FLUSH_COUNT 16
+
+typedef struct pheap_tcache_bin {
+    void *ptrs[PHEAP_TCACHE_CAPACITY];
+    uint32_t count;
+} pheap_tcache_bin_t;
+
+typedef struct pheap_tcache {
+    pheap_tcache_bin_t bins[PHEAP_TCACHE_BINS];
+} pheap_tcache_t;
+
+#ifdef _MSC_VER
+    static __declspec(thread) pheap_tcache_t *tls_tcache = PHEAP_NULL;
+#else
+    static __thread pheap_tcache_t *tls_tcache = PHEAP_NULL;
+#endif
+
+//
+// Size classes: 16, 32, 64, 128, 256, 512, 1024, 2048
+// Bin index = bitscan(roundup_pow2(max(n,16))) - 4
+//
+pheap_inline static int tcache_size_to_bin(size_t n)
+{
+    uint32_t v;
+    if(n < 16) n = 16;
+    if(n > PHEAP_TCACHE_MAX_SIZE) return -1;
+    // Round up to next power of 2
+    v = (uint32_t)(n - 1);
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v++;
+    return (int)bitscan_forward32(v) - 4;
+}
+
+pheap_inline static size_t tcache_bin_to_size(int bin)
+{
+    return (size_t)16 << bin;
+}
+
+static void tcache_flush_bin(pheap_tcache_bin_t *bin, pheap_t heap)
+{
+    uint32_t flush = PHEAP_TCACHE_FLUSH_COUNT;
+    uint32_t i;
+    if(flush > bin->count) flush = bin->count;
+
+    for(i = 0; i < flush; ++i)
+    {
+        pheap_free(heap, bin->ptrs[bin->count - 1 - i]);
+    }
+    bin->count -= flush;
+}
+
+static void tcache_flush_all(pheap_tcache_t *tc, pheap_t heap)
+{
+    int i;
+    for(i = 0; i < PHEAP_TCACHE_BINS; ++i)
+    {
+        pheap_tcache_bin_t *bin = &tc->bins[i];
+        while(bin->count > 0)
+        {
+            bin->count--;
+            pheap_free(heap, bin->ptrs[bin->count]);
+        }
+    }
+}
+
+#ifdef PHEAP_POSIX
+    #include <pthread.h>
+    static pthread_key_t g_tcache_key;
+    static pheap_internal_lock_t g_tcache_key_lock = 0;
+    static int g_tcache_key_created = 0;
+
+    static void tcache_thread_destructor(void *ptr)
+    {
+        pheap_tcache_t *tc = (pheap_tcache_t *)ptr;
+        if(tc)
+        {
+            pheap_t heap = pheap_global_load();
+            if(heap)
+            {
+                tcache_flush_all(tc, heap);
+            }
+            pheap_system_free(tc, sizeof(pheap_tcache_t));
+        }
+    }
+
+    static void tcache_ensure_key(void)
+    {
+        if(!g_tcache_key_created)
+        {
+            lock_internal_lock(&g_tcache_key_lock);
+            if(!g_tcache_key_created)
+            {
+                pthread_key_create(&g_tcache_key, tcache_thread_destructor);
+                g_tcache_key_created = 1;
+            }
+            unlock_internal_lock(&g_tcache_key_lock);
+        }
+    }
+#elif defined(PHEAP_WIN)
+    static DWORD g_tcache_fls = FLS_OUT_OF_INDEXES;
+    static pheap_internal_lock_t g_tcache_fls_lock = 0;
+
+    static VOID NTAPI tcache_fls_callback(PVOID ptr)
+    {
+        pheap_tcache_t *tc = (pheap_tcache_t *)ptr;
+        if(tc)
+        {
+            pheap_t heap = pheap_global_load();
+            if(heap)
+            {
+                tcache_flush_all(tc, heap);
+            }
+            VirtualFree(tc, 0, MEM_RELEASE);
+        }
+    }
+
+    static void tcache_ensure_key(void)
+    {
+        if(g_tcache_fls == FLS_OUT_OF_INDEXES)
+        {
+            lock_internal_lock(&g_tcache_fls_lock);
+            if(g_tcache_fls == FLS_OUT_OF_INDEXES)
+            {
+                g_tcache_fls = FlsAlloc(tcache_fls_callback);
+            }
+            unlock_internal_lock(&g_tcache_fls_lock);
+        }
+    }
+#endif
+
+static pheap_tcache_t *tcache_get_or_create(void)
+{
+    pheap_tcache_t *tc = tls_tcache;
+    if(tc) return tc;
+
+    tcache_ensure_key();
+
+#ifdef PHEAP_POSIX
+    tc = (pheap_tcache_t *)pheap_system_alloc(sizeof(pheap_tcache_t), 0);
+    if(PHEAP_NULL == tc) return PHEAP_NULL;
+    pheap_memset(tc, 0, sizeof(*tc));
+    tls_tcache = tc;
+    pthread_setspecific(g_tcache_key, tc);
+#elif defined(PHEAP_WIN)
+    tc = (pheap_tcache_t *)VirtualAlloc(PHEAP_NULL, sizeof(pheap_tcache_t),
+                                         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if(PHEAP_NULL == tc) return PHEAP_NULL;
+    pheap_memset(tc, 0, sizeof(*tc));
+    tls_tcache = tc;
+    FlsSetValue(g_tcache_fls, tc);
+#endif
+
+    return tc;
+}
+
+pheap_inline static void *tcache_alloc(size_t n)
+{
+    int bin_idx;
+    pheap_tcache_t *tc;
+    pheap_tcache_bin_t *bin;
+
+    bin_idx = tcache_size_to_bin(n);
+    if(bin_idx < 0) return PHEAP_NULL;
+
+    tc = tcache_get_or_create();
+    if(PHEAP_NULL == tc) return PHEAP_NULL;
+
+    bin = &tc->bins[bin_idx];
+    if(bin->count > 0)
+    {
+        bin->count--;
+        return bin->ptrs[bin->count];
+    }
+
+    return PHEAP_NULL;
+}
+
+pheap_inline static int tcache_free(void *p, size_t alloc_size)
+{
+    int bin_idx;
+    pheap_tcache_t *tc;
+    pheap_tcache_bin_t *bin;
+
+    if(alloc_size > PHEAP_TCACHE_MAX_SIZE) return 0;
+
+    bin_idx = tcache_size_to_bin(alloc_size);
+    if(bin_idx < 0) return 0;
+
+    tc = tcache_get_or_create();
+    if(PHEAP_NULL == tc) return 0;
+
+    bin = &tc->bins[bin_idx];
+    if(bin->count >= PHEAP_TCACHE_CAPACITY)
+    {
+        tcache_flush_bin(bin, pheap_global_load());
+    }
+
+    bin->ptrs[bin->count] = p;
+    bin->count++;
+    return 1;
+}
+
+#endif // PHEAP_USE_THREAD_CACHE
 
 void *pheap_g_alloc(size_t n)
 {
@@ -1449,7 +1765,18 @@ void *pheap_g_alloc(size_t n)
     {
         return PHEAP_NULL;
     }
-    return pheap_alloc(g_pheap, n);
+#if PHEAP_USE_THREAD_CACHE != 0
+    {
+        int bin_idx = tcache_size_to_bin(n);
+        if(bin_idx >= 0)
+        {
+            void *p = tcache_alloc(n);
+            if(p) return p;
+            return pheap_alloc(pheap_global_load(), tcache_bin_to_size(bin_idx));
+        }
+    }
+#endif
+    return pheap_alloc(pheap_global_load(), n);
 }
 
 void *pheap_g_zalloc(size_t n)
@@ -1458,7 +1785,22 @@ void *pheap_g_zalloc(size_t n)
     {
         return PHEAP_NULL;
     }
-    return pheap_zalloc(g_pheap, n);
+#if PHEAP_USE_THREAD_CACHE != 0
+    {
+        int bin_idx = tcache_size_to_bin(n);
+        if(bin_idx >= 0)
+        {
+            void *p = tcache_alloc(n);
+            if(p)
+            {
+                pheap_memset(p, 0, n);
+                return p;
+            }
+            return pheap_zalloc(pheap_global_load(), tcache_bin_to_size(bin_idx));
+        }
+    }
+#endif
+    return pheap_zalloc(pheap_global_load(), n);
 }
 
 void *pheap_g_realloc(void *p, size_t n)
@@ -1467,13 +1809,36 @@ void *pheap_g_realloc(void *p, size_t n)
     {
         return PHEAP_NULL;
     }
-    return pheap_realloc(g_pheap, p, n);
+#if PHEAP_USE_THREAD_CACHE != 0
+    if(p)
+    {
+        size_t old_size = pheap_msize(p);
+        void *np = pheap_g_alloc(n);
+        if(PHEAP_NULL == np) return PHEAP_NULL;
+        pheap_memcpy(np, p, (n < old_size) ? n : old_size);
+        pheap_g_free(p);
+        return np;
+    }
+    return pheap_g_alloc(n);
+#else
+    return pheap_realloc(pheap_global_load(), p, n);
+#endif
 }
 
 void pheap_g_free(void *p)
 {
-    // If the first thing you do is call free the crash is on you...
-    pheap_free(g_pheap, p);
+    if(!p) return;
+#if PHEAP_USE_THREAD_CACHE != 0
+    {
+        pheap_allocation_t *a = pheap_mem_to_obj(p);
+        if(!(a->extra & PHEAP_AFLAG_IS_HUGE))
+        {
+            size_t sz = (size_t)a->size;
+            if(tcache_free(p, sz)) return;
+        }
+    }
+#endif
+    pheap_free(pheap_global_load(), p);
 }
 
 #endif

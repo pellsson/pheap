@@ -4,3 +4,4 @@ pheap-test
 pheap-test.exe
 pheap.lib
 pheap-test-ext
+pheap-test-tcache

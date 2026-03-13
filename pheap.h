@@ -52,23 +52,30 @@
 //   * void pheap_lock_lock(pheap_lock_t *lock);
 //   * void pheap_unlock_lock(pheap_lock_t *lock);
 //
+#define PHEAP_NO_LOCK        0  // Disables all locks
+#define PHEAP_WIN32_LOCK     1  // Uses native Win32 CRITICAL_SECTION
+#define PHEAP_PTHREAD_LOCK   2  // Uses pthread_mutex_t
+#define PHEAP_INTERNAL_LOCK  3  // Uses internal cross-platform spinlock
+
 #ifdef PHEAP_OVERRIDE_LOCK_HEADER
     #include PHEAP_OVERRIDE_LOCK_HEADER
     #define PHEAP_LOCK_PRIMITIVE -1
+    #define PHEAP_HAS_LOCKS 1
 #else
 	// PHEAP_LOCK_PRIMITIVE
-	// Set to one of the following:
-	#define PHEAP_NO_LOCK        0  // Disables all locks
-	#define PHEAP_WIN32_LOCK     1  // Uses native Win32 CRITICAL_SECTION
-	#define PHEAP_PTHREAD_LOCK   2  // Uses pthread_mutex_t
-	#define PHEAP_INTERNAL_LOCK  3  // Uses internal cross-platform spinlock
-
+	// Set to one of the above constants:
 	#ifndef PHEAP_LOCK_PRIMITIVE
 	    #ifdef _WIN32
 	        #define PHEAP_LOCK_PRIMITIVE PHEAP_WIN32_LOCK
 	    #else
 	        #define PHEAP_LOCK_PRIMITIVE PHEAP_PTHREAD_LOCK
 	    #endif
+	#endif
+
+	#if PHEAP_LOCK_PRIMITIVE != PHEAP_NO_LOCK
+	    #define PHEAP_HAS_LOCKS 1
+	#else
+	    #define PHEAP_HAS_LOCKS 0
 	#endif
 #endif
 
@@ -114,15 +121,20 @@
 	#define msize pheap_msize
 #endif
 
-//
-// TODO Remove this constant in version 2.0 when we add reserve+commit.
-//
-#ifdef PHEAP_TEST
-	#define PHEAP_MEMBLOCK_SIZE_HINT 0x4000
-#else
-	#ifndef PHEAP_MEMBLOCK_SIZE_HINT
-		#define PHEAP_MEMBLOCK_SIZE_HINT (32 * 0x100000)
-	#endif
+#ifndef PHEAP_MEMBLOCK_SIZE_HINT
+	#define PHEAP_MEMBLOCK_SIZE_HINT (32 * 0x100000)
+#endif
+
+// PHEAP_USE_THREAD_CACHE
+// Enables per-thread allocation cache for the global heap.
+// Reduces lock contention for small allocations.
+// Requires PHEAP_USE_GLOBAL_HEAP=1.
+#ifndef PHEAP_USE_THREAD_CACHE
+	#define PHEAP_USE_THREAD_CACHE 0
+#endif
+
+#if PHEAP_USE_THREAD_CACHE != 0 && PHEAP_USE_GLOBAL_HEAP == 0
+	#error PHEAP_USE_THREAD_CACHE requires PHEAP_USE_GLOBAL_HEAP=1
 #endif
 
 #ifdef __cplusplus
@@ -137,7 +149,7 @@ typedef struct pheap * pheap_t;
 //
 #define PHEAP_FLAG_EXEC 0x01 // Allocate the heap as executable.
 
-#if PHEAP_LOCK_PRIMITIVE != PHEAP_NO_LOCK
+#if PHEAP_HAS_LOCKS
 	#define PHEAP_FLAG_THREADSAFE 0x02 // Make the heap thread-safe.
 #endif
 
@@ -150,6 +162,7 @@ typedef struct pheap_alloc_config
 	pheap_mem_alloc custom_alloc;
 	pheap_mem_free custom_free;
 	void *context;
+	size_t memblock_size; // 0 = use PHEAP_MEMBLOCK_SIZE_HINT default
 }
 pheap_alloc_config_t;
 

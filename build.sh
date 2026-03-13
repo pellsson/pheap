@@ -6,7 +6,7 @@ AR=${AR:-ar}
 OBJDIR=obj
 CFLAGS="-Wall -Wextra -fPIE -Wno-attributes -Wno-unused-function"
 
-TEST_DEFS="-DPHEAP_TEST -DPHEAP_USE_GLOBAL_HEAP=1 -DPHEAP_INTERNAL_DEBUG=1"
+TEST_DEFS="-DPHEAP_TEST -DPHEAP_USE_GLOBAL_HEAP=1 -DPHEAP_INTERNAL_DEBUG=1 -DPHEAP_MEMBLOCK_SIZE_HINT=0x4000"
 
 function do_verbose() {
 	echo "$1"
@@ -38,6 +38,9 @@ do_verbose "$CXX $TEST_DEFS $CFLAGS test/test.cpp $OBJDIR/pheap-test.o -o pheap-
 echo "Building pheap tests with override ($CXX)"
 do_verbose "$CC $TEST_DEFS -DPHEAP_OVERRIDE_SYSTEM_HEADER=\"test/test_system.h\" -DPHEAP_OVERRIDE_LOCK_HEADER=\"test/test_locks.h\" $CFLAGS pheap.c -o $OBJDIR/pheap-test-ext.o -c"
 do_verbose "$CXX $TEST_DEFS $CFLAGS test/test.cpp $OBJDIR/pheap-test-ext.o -o pheap-test-ext"
+echo "Building pheap tests with thread cache ($CXX)"
+do_verbose "$CC $TEST_DEFS -DPHEAP_USE_THREAD_CACHE=1 $CFLAGS pheap.c -o $OBJDIR/pheap-test-tcache.o -c"
+do_verbose "$CXX $TEST_DEFS -DPHEAP_USE_THREAD_CACHE=1 $CFLAGS test/test.cpp $OBJDIR/pheap-test-tcache.o -o pheap-test-tcache -lpthread"
 
 
 

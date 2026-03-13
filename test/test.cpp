@@ -377,7 +377,7 @@ static void find_best_fault_order()
 		{
 			// test_many_pools(heap);
 			test_fixed();
-			pheap_destory(heap);
+			pheap_destroy(heap);
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER)
 		{
@@ -505,7 +505,7 @@ int main()
 #endif
 
 		printf("Destroying heap...\n");
-		pheap_destory(heap);
+		pheap_destroy(heap);
 
 #if PHEAP_USE_GLOBAL_HEAP != 0
 		printf("Testing global heap...\n");
